@@ -1,0 +1,1513 @@
+use crate::asm::SymbolMap;
+use crate::hex_types::{HexU16, HexU24, HexU8, HexValue};
+use crate::xml_types::{DataOrAddress, DecompSection};
+use anyhow::{anyhow, Context, Result};
+use glob::glob;
+use itertools::Itertools;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{BufReader, BufWriter, Write};
+use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+mod asm;
+mod hex_types;
+mod xml_types;
+
+struct DeduperEntry<T> {
+    data: T,
+    labels: Vec<String>,
+    refcount: u32,
+}
+
+struct OwningRef<T>(usize, String, PhantomData<fn(T) -> T>);
+
+impl<T> OwningRef<T> {
+    fn label(&self) -> &str {
+        &self.1
+    }
+}
+
+impl<T> Hash for OwningRef<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+struct DataDeduper<T> {
+    entries: Vec<DeduperEntry<T>>,
+    hash_to_id: HashMap<u64, usize>,
+}
+
+// `derive(Default)` adds an unwanted bound on T, so this needs to be impl'd manually
+impl<T> Default for DataDeduper<T> {
+    fn default() -> Self {
+        DataDeduper {
+            entries: Vec::new(),
+            hash_to_id: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Hash> DataDeduper<T> {
+    fn insert(&mut self, data: T, label: String) -> OwningRef<T> {
+        let mut hasher = DefaultHasher::new();
+        data.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let &mut id = self.hash_to_id.entry(hash).or_insert_with(|| {
+            let id = self.entries.len();
+            self.entries.push(DeduperEntry {
+                data,
+                labels: Vec::new(),
+                refcount: 0,
+            });
+            id
+        });
+
+        let entry = &mut self.entries[id];
+        entry.labels.push(label.clone());
+        entry.refcount += 1;
+        OwningRef(id, label, PhantomData)
+    }
+
+    fn get(&self, id: OwningRef<T>) -> Option<&DeduperEntry<T>> {
+        self.entries.get(id.0)
+    }
+}
+
+impl<T> DataDeduper<T> {
+    fn entries(&self) -> &[DeduperEntry<T>] {
+        &self.entries
+    }
+
+    fn emit_asm_for_entries<F>(&self, w: &mut Writer, mut f: F) -> Result<()>
+    where
+        F: FnMut(&mut Writer, &T) -> Result<()>,
+    {
+        self.emit_asm_for_entries_with_metadata(w, |w, e| f(w, &e.data))
+    }
+
+    fn emit_asm_for_entries_with_metadata<F>(&self, w: &mut Writer, mut f: F) -> Result<()>
+    where
+        F: FnMut(&mut Writer, &DeduperEntry<T>) -> Result<()>,
+    {
+        for e in &self.entries {
+            writeln!(w)?;
+            for l in &e.labels {
+                writeln!(w, "{l}:")?;
+            }
+            f(w, e)?;
+        }
+        Ok(())
+    }
+}
+
+type Writer<'a> = BufWriter<&'a mut dyn Write>;
+
+type RoomId = (u8 /* area index */, u8 /* room index */);
+
+struct RoomHeader {
+    name: String,
+
+    room_index: HexU8,
+    area_index: HexU8,
+
+    room_map_x: HexU8,
+    room_map_y: HexU8,
+    room_width: HexU8,
+    room_height: HexU8,
+
+    up_scroll: HexU8,
+    down_scroll: HexU8,
+
+    special_gfx_flags: HexU8,
+
+    // Not going to dedup door lists yet
+    exits: Vec<OwningRef<ExitType>>,
+    states: Vec<RoomState>,
+}
+
+impl RoomHeader {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml_room: &xml_types::Room,
+        room_name: String,
+    ) -> Result<(RoomId, RoomHeader)> {
+        let room_id = (xml_room.area.0, xml_room.index.0);
+        let exits = xml_room
+            .doors
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let exit_name = format!("{room_name}_{i}");
+                let exit = ExitType::from_xml(rom_data, x, &exit_name)?;
+                Ok(rom_data.doors.insert(exit, format!("Door_{exit_name}")))
+            })
+            .collect::<Result<_>>()?;
+        let states = xml_room
+            .states
+            .iter()
+            .rev() // SMART Saves room states in reverse order
+            .enumerate()
+            .map(|(i, x)| RoomState::from_xml(rom_data, x, format!("{room_name}_{i}")))
+            .collect::<Result<_>>()?;
+        for xml_save in &xml_room.saves {
+            let (save_id, save) = LoadStation::from_xml(rom_data, xml_save, room_id)?;
+            rom_data
+                .load_stations
+                .insert((xml_room.area, save_id), save);
+        }
+
+        Ok((
+            room_id,
+            RoomHeader {
+                name: room_name,
+                room_index: xml_room.index,
+                area_index: xml_room.area,
+                room_map_x: xml_room.x,
+                room_map_y: xml_room.y,
+                room_width: xml_room.width,
+                room_height: xml_room.height,
+                up_scroll: xml_room.upscroll,
+                down_scroll: xml_room.dnscroll,
+                special_gfx_flags: xml_room.special_gfx,
+                exits,
+                states,
+            },
+        ))
+    }
+
+    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
+        let room_name = &self.name;
+
+        writeln!(
+            w,
+            "    db {},{},{},{},{},{},{},{},{}",
+            self.room_index,
+            self.area_index,
+            self.room_map_x,
+            self.room_map_y,
+            self.room_width,
+            self.room_height,
+            self.up_scroll,
+            self.down_scroll,
+            self.special_gfx_flags
+        )?;
+        writeln!(w, "    dw RoomDoors_{room_name}")?;
+
+        for (i, state) in self.states.iter().enumerate().rev() {
+            write!(
+                w,
+                "    dw {}",
+                symbols.resolve_label(0x8F, state.condition_test)
+            )?;
+            for arg in &state.condition_test_args {
+                write!(w, " : db {arg}")?;
+            }
+            writeln!(w)?;
+
+            if i != 0 {
+                writeln!(w, "    dw RoomState_{room_name}_{i}")?;
+            }
+        }
+
+        for (i, state) in self.states.iter().enumerate() {
+            writeln!(w, "\nRoomState_{room_name}_{i}:")?;
+            writeln!(w, "    dl {}", state.level_data.label())?;
+            writeln!(
+                w,
+                "    db {},{},{}",
+                state.gfx_set, state.music_set, state.music_track
+            )?;
+            match &state.fx_header {
+                None => writeln!(w, "    dw $0000")?,
+                Some(fx_header) => writeln!(w, "    dw {}", fx_header.label())?,
+            }
+            writeln!(w, "    dw {}", state.enemy_population.label())?;
+            writeln!(w, "    dw {}", state.enemy_gfx_set.label())?;
+            let no_layer2_bit = if state.layer2_exists { 0 } else { 1 };
+            writeln!(
+                w,
+                "    db {},{}",
+                HexU8(state.layer2_scroll_x.0 | no_layer2_bit),
+                HexU8(state.layer2_scroll_y.0 | no_layer2_bit)
+            )?;
+            match &state.scroll_data {
+                ScrollDataKind::Fixed(val) => writeln!(w, "    dw {}", val)?,
+                ScrollDataKind::Ref(scroll_data) => writeln!(w, "    dw {}", scroll_data.label())?,
+            }
+            writeln!(w, "    dw {}", state.unused_roomvar)?;
+            writeln!(w, "    dw {}", symbols.resolve_label(0x8F, state.main_asm))?;
+            writeln!(w, "    dw {}", state.plm_population.label())?;
+            match &state.bgdata_commands {
+                None => writeln!(w, "    dw $0000")?,
+                Some(bgdata_commands) => writeln!(w, "    dw {}", bgdata_commands.label())?,
+            }
+            writeln!(w, "    dw {}", symbols.resolve_label(0x8F, state.setup_asm))?;
+        }
+
+        writeln!(w, "\nRoomDoors_{room_name}:")?;
+        for exit in &self.exits {
+            writeln!(w, "    dw {}", exit.label())?;
+        }
+
+        Ok(())
+    }
+}
+
+type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
+
+#[derive(Hash)]
+enum ExitType {
+    Elevator,
+    Door(DoorHeader),
+}
+
+#[derive(Hash)]
+struct DoorHeader {
+    destination: RoomId,
+    transition_flags: HexU8, // 0x80 = elevator destination, 0x40 = area change
+    transition_type: HexU8,  // 0x04 = create door cap, 0x03 = direction
+    doorcap_tile_x: HexU8,
+    doorcap_tile_y: HexU8,
+    destination_screen_x: HexU8,
+    destination_screen_y: HexU8,
+    samus_slide_speed: HexU16,
+    door_asm: DoorAsmType,
+}
+
+impl ExitType {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &xml_types::DoorEntry,
+        exit_name: &str,
+    ) -> Result<ExitType> {
+        Ok(match xml {
+            xml_types::DoorEntry::Elevator => ExitType::Elevator,
+            xml_types::DoorEntry::Door(d) => ExitType::Door(DoorHeader {
+                destination: (d.toroom.area.into(), d.toroom.index.into()),
+                transition_flags: d.bitflag,
+                transition_type: d.direction,
+                doorcap_tile_x: HexU8(d.screenx.0 * 0x10 + d.tilex.0),
+                doorcap_tile_y: HexU8(d.screeny.0 * 0x10 + d.tiley.0),
+                destination_screen_x: d.screenx,
+                destination_screen_y: d.screeny,
+                samus_slide_speed: d.distance,
+                door_asm: DoorAsmType::from_xml(rom_data, &d.doorcode, exit_name)?,
+            }),
+        })
+    }
+
+    fn emit_asm(
+        &self,
+        w: &mut Writer,
+        symbols: &SymbolMap,
+        rooms: &BTreeMap<RoomId, RoomHeader>,
+    ) -> Result<()> {
+        let ExitType::Door(door) = self else {
+            writeln!(w, "    dw $0000")?;
+            return Ok(());
+        };
+
+        let Some(target_room) = rooms.get(&door.destination) else {
+            return Err(anyhow!(
+                "Door destination (${:02X},${:02X}) not found",
+                door.destination.0,
+                door.destination.1
+            ));
+        };
+        writeln!(w, "    dw RoomHeader_{}", target_room.name)?;
+        writeln!(
+            w,
+            "    db {},{},{},{},{},{}",
+            door.transition_flags,
+            door.transition_type,
+            door.doorcap_tile_x,
+            door.doorcap_tile_y,
+            door.destination_screen_x,
+            door.destination_screen_y
+        )?;
+        writeln!(w, "    dw {}", door.samus_slide_speed)?;
+        match &door.door_asm {
+            DoorAsmType::Address(addr) => {
+                writeln!(w, "    dw {}", symbols.resolve_label(0x8F, *addr))?
+            }
+            DoorAsmType::ScrollDataUpdate(ref_) => writeln!(w, "    dw {}", ref_.label())?,
+            DoorAsmType::DoorCode(ref_) => writeln!(w, "    dw {}", ref_.label())?,
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Hash, Copy, Clone)]
+struct ScrollDataChange {
+    value: HexU8,
+    screen_index: HexU8,
+}
+
+impl From<&xml_types::ScrollDataChangeEntry> for ScrollDataChange {
+    fn from(xml: &xml_types::ScrollDataChangeEntry) -> Self {
+        let &xml_types::ScrollDataChangeEntry::Change { screen, scroll } = xml;
+        ScrollDataChange {
+            value: scroll,
+            screen_index: screen,
+        }
+    }
+}
+
+fn emit_doorcode_asm_for_scrolldata_change(
+    w: &mut Writer,
+    changes: &[ScrollDataChange],
+) -> Result<()> {
+    let mut changes = changes.to_vec();
+    changes.sort_by_key(|c| (c.value, c.screen_index));
+
+    let mut current_a = None;
+
+    writeln!(w, "    php")?;
+    writeln!(w, "    sep #$20")?;
+    for change in changes {
+        if current_a != Some(change.value) {
+            writeln!(w, "    lda.b #{}", change.value)?;
+            current_a = Some(change.value);
+        }
+        let target_addr = HexU24(0x7ECD20 + change.screen_index.0 as u32);
+        writeln!(w, "    sta {target_addr}")?;
+    }
+    writeln!(w, "    plp")?;
+    writeln!(w, "    rts")?;
+    Ok(())
+}
+
+#[derive(Hash)]
+enum DoorAsmType {
+    Address(HexU16), // label
+    ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
+    DoorCode(OwningRef<Vec<CodeInstruction>>),
+}
+
+#[derive(Hash)]
+struct CodeInstruction {
+    op: HexU8,
+    arg: Option<HexValue>,
+}
+
+fn count_true<const N: usize>(conds: [bool; N]) -> usize {
+    conds.into_iter().filter(|&b| b).count()
+}
+
+impl DoorAsmType {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &xml_types::DoorCode,
+        exit_name: &str,
+    ) -> Result<DoorAsmType> {
+        if 1 != count_true([
+            !xml.ops.is_empty(),
+            xml.scroll_data.is_some(),
+            xml.address.is_some(),
+        ]) {
+            return Err(anyhow!(
+                "Exactly one of `ops`, `scroll_data` or `address` must be set."
+            ));
+        }
+
+        if let Some(address) = xml.address {
+            Ok(DoorAsmType::Address(address))
+        } else if let Some(scroll_data) = &xml.scroll_data {
+            let scroll_data_update = rom_data.doorcode_scroll_updates.insert(
+                scroll_data.entries.iter().map(From::from).collect(),
+                format!("DoorASM_Scroll_{exit_name}"),
+            );
+            Ok(DoorAsmType::ScrollDataUpdate(scroll_data_update))
+        } else {
+            let doorcode = xml
+                .ops
+                .iter()
+                .map(|x| CodeInstruction {
+                    op: x.op,
+                    arg: x.arg,
+                })
+                .collect();
+            let doorcode_ref = rom_data
+                .doorcode_raw
+                .insert(doorcode, format!("DoorASM_Raw_{exit_name}"));
+            Ok(DoorAsmType::DoorCode(doorcode_ref))
+        }
+    }
+}
+
+struct RoomState {
+    // Not part of header
+    condition_test: HexU16,          // label
+    condition_test_args: Vec<HexU8>, // TODO other types and merge with `_test` once that's done
+
+    level_data: OwningRef<Vec<u8>>,
+
+    gfx_set: HexU8,
+    music_set: HexU8,
+    music_track: HexU8,
+
+    fx_header: Option<OwningRef<FxHeader>>, // Set to $0000 if missing
+    enemy_population: OwningRef<EnemyPopulation>,
+    enemy_gfx_set: OwningRef<EnemyGfxSet>,
+
+    layer2_scroll_x: HexU8,
+    layer2_scroll_y: HexU8,
+    layer2_exists: bool, // TODO: Do I need this? Gets OR'd to lower bits of scroll_x/y
+
+    scroll_data: ScrollDataKind,
+    unused_roomvar: HexU16,
+    main_asm: HexU16, // label
+    plm_population: OwningRef<PlmPopulation>,
+    bgdata_commands: Option<OwningRef<BgDataCommandList>>,
+    setup_asm: HexU16, // label
+}
+
+const TILES_PER_SCREEN: usize = 16 * 16;
+
+fn copy_layer_tiles<T, U>(
+    src_layer: &xml_types::LevelDataLayer<T>,
+    width: usize,
+    height: usize,
+    dst_data: &mut [U],
+    f: impl Fn(&T, &mut U),
+) -> Result<()> {
+    for screen in &src_layer.screens {
+        if screen.x.0 as usize >= width || screen.y.0 as usize >= height {
+            return Err(anyhow!(
+                "Screen ({},{}) is out of bounds",
+                screen.x,
+                screen.y
+            ));
+        }
+        if screen.data.len() != TILES_PER_SCREEN {
+            return Err(anyhow!(
+                "Screen ({},{}) is mis-sized (${:X} tiles)",
+                screen.x,
+                screen.y,
+                screen.data.len()
+            ));
+        }
+
+        let row_stride = width * 16;
+        let mut offset = screen.y.0 as usize * 16 * row_stride + screen.x.0 as usize * 16;
+        for row in screen.data.chunks_exact(16) {
+            for (a, b) in row.iter().zip(&mut dst_data[offset..offset + 16]) {
+                f(a, b);
+            }
+            offset += row_stride;
+        }
+    }
+    Ok(())
+}
+
+fn level_data_from_xml(xml: &xml_types::LevelData) -> Result<Vec<u8>> {
+    let width = xml.width.0 as usize;
+    let height = xml.height.0 as usize;
+    let screens = width * xml.height.0 as usize;
+    let total_tiles = screens * TILES_PER_SCREEN;
+
+    let layer1_size = total_tiles * 2;
+    let bts_size = total_tiles * 1;
+    let layer2_size = if xml.layer2.is_some() {
+        total_tiles * 2
+    } else {
+        0
+    };
+
+    let mut buffer = vec![0u8; 2 + layer1_size + bts_size + layer2_size];
+    buffer[0..2].copy_from_slice(&(layer1_size as u16).to_le_bytes());
+    let (layer1_data, bts_data) = buffer[2..].split_at_mut(layer1_size);
+    let (bts_data, layer2_data) = bts_data.split_at_mut(bts_size);
+
+    let layer1_data: &mut [u16] = bytemuck::cast_slice_mut(layer1_data);
+    copy_layer_tiles(
+        &xml.layer1,
+        width,
+        height,
+        layer1_data,
+        |HexU16(src), dst| *dst = src.to_le(),
+    )?;
+
+    let bts_data: &mut [u8] = bytemuck::cast_slice_mut(bts_data);
+    copy_layer_tiles(&xml.bts, width, height, bts_data, |HexU8(src), dst| {
+        *dst = src.to_le()
+    })?;
+
+    if let Some(layer2) = &xml.layer2 {
+        let layer2_data: &mut [u16] = bytemuck::cast_slice_mut(layer2_data);
+        copy_layer_tiles(layer2, width, height, layer2_data, |HexU16(src), dst| {
+            *dst = src.to_le()
+        })?;
+    }
+
+    Ok(buffer)
+}
+
+impl RoomState {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &xml_types::RoomState,
+        state_name: String,
+    ) -> Result<RoomState> {
+        let level_data_ref = rom_data.compressed_level_data.insert(
+            level_data_from_xml(&xml.level_data)?,
+            format!("LevelData_{state_name}"),
+        );
+        let fx_header_ref = FxHeaderEntry::from_xml(rom_data, &xml.fx1s)?.map(|header| {
+            rom_data
+                .fx_headers
+                .insert(header, format!("FXHeader_{state_name}"))
+        });
+        let enemy_population_ref = rom_data.enemy_populations.insert(
+            EnemyPopulation::from_xml(&xml.enemies),
+            format!("EnemyPopulations_{state_name}"),
+        );
+        let enemy_gfx_set_ref = rom_data.enemy_gfx_sets.insert(
+            EnemyGfxSetEntry::from_xml(&xml.enemy_types),
+            format!("EnemySets_{state_name}"),
+        );
+        let scroll_data = ScrollDataKind::from_xml(rom_data, &xml.scroll_data, &state_name)?;
+        let plm_population = PlmPopulationEntry::from_xml(rom_data, &xml.plms, &state_name)?;
+        let plm_population_ref = rom_data
+            .plm_populations
+            .insert(plm_population, format!("PLMPopulation_{state_name}"));
+        let bgdata_commands = BgDataCommand::from_xml(rom_data, &xml.bg_data, &state_name)?;
+        let bgdata_commands_ref = if bgdata_commands.is_empty() {
+            None
+        } else {
+            rom_data
+                .bgdata_commands
+                .insert(bgdata_commands, format!("LibBG_{state_name}"))
+                .into()
+        };
+
+        let condition_test = match xml.condition {
+            xml_types::StateCondition::Default => HexU16(0xE5E6), // `Use_StatePointer_inX`
+            xml_types::StateCondition::Short(a) => a,
+        };
+        // TODO: Proper sizes/types
+        let condition_test_args = xml
+            .condition_args
+            .iter()
+            .map(|x| (x.value.0 as u8).into())
+            .collect();
+
+        Ok(RoomState {
+            condition_test,
+            condition_test_args,
+            level_data: level_data_ref,
+            gfx_set: xml.gfx_set,
+            music_set: (xml.music.0 as u8).into(),
+            music_track: ((xml.music.0 >> 8) as u8).into(),
+            fx_header: fx_header_ref,
+            enemy_population: enemy_population_ref,
+            enemy_gfx_set: enemy_gfx_set_ref,
+            layer2_scroll_x: xml.layer2_xscroll,
+            layer2_scroll_y: xml.layer2_yscroll,
+            layer2_exists: xml.layer2_type == xml_types::LayerType::Layer2,
+            scroll_data,
+            unused_roomvar: xml.roomvar,
+            main_asm: xml.fx2,
+            plm_population: plm_population_ref,
+            bgdata_commands: bgdata_commands_ref,
+            setup_asm: xml.layer1_2,
+        })
+    }
+}
+
+type FxHeader = Vec<FxHeaderEntry>;
+
+#[derive(Hash)]
+struct FxHeaderEntry {
+    from_door: Option<DoorId>,
+    liquid_y_start: HexU16,
+    liquid_y_target: HexU16,
+    liquid_y_speed: HexU16,
+    liquid_timer: HexU8,
+    fx_type: HexU8,
+    layer_blend1: HexU8,
+    layer_blend2: HexU8,
+    liquid_flags: HexU8,
+    enabled_palette_anims: HexU8, // bitset
+    enabled_tile_anims: HexU8,    // bitset
+    palette_blend_index: HexU8,
+}
+
+impl FxHeaderEntry {
+    fn from_xml(rom_data: &mut RomData, xml: &[xml_types::Fx1]) -> Result<Option<FxHeader>> {
+        if xml.is_empty() {
+            return Ok(None);
+        }
+
+        xml.iter()
+            .enumerate()
+            .map(|(i, fx)| {
+                let from_door = match (fx.default, fx.roomarea, fx.roomindex, fx.fromdoor) {
+                    (true, None, None, None) => None,
+                    (false, Some(area), Some(index), Some(door)) => {
+                        Some(((area.0, index.0), door.0))
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Fx1 `default` and door reference are mutually exclusive"
+                        ))
+                    }
+                };
+                if from_door.is_none() != (i == xml.len() - 1) {
+                    dbg!(from_door, i, xml.len() - 1);
+                    return Err(anyhow!(
+                        "Fx1 without `from_door` must (only) occur at end of header"
+                    ));
+                }
+
+                Ok(FxHeaderEntry {
+                    from_door,
+                    liquid_y_start: fx.surfacestart,
+                    liquid_y_target: fx.surfacenew,
+                    liquid_y_speed: fx.surfacespeed,
+                    liquid_timer: fx.surfacedelay,
+                    fx_type: fx.type_,
+                    layer_blend1: fx.transparency1_a,
+                    layer_blend2: fx.transparency2_b,
+                    liquid_flags: fx.liquidflags_c,
+                    enabled_palette_anims: fx.paletteflags,
+                    enabled_tile_anims: fx.animationflags,
+                    palette_blend_index: fx.paletteblend,
+                })
+            })
+            .collect::<Result<_>>()
+            .map(Some)
+    }
+
+    fn emit_asm(
+        &self,
+        w: &mut Writer,
+        symbols: &SymbolMap,
+        rooms: &BTreeMap<RoomId, RoomHeader>,
+    ) -> Result<()> {
+        write!(w, "    dw ")?;
+        if let Some(door_id) = self.from_door {
+            let Some(target_room) = rooms.get(&door_id.0) else {
+                return Err(anyhow!(
+                    "FX from_door room ({:02X},${:02X}) not found",
+                    door_id.0 .0,
+                    door_id.0 .1,
+                ));
+            };
+            writeln!(w, "Door_{}_{}", target_room.name, door_id.1)?;
+        } else {
+            writeln!(w, "$0000")?;
+        }
+        writeln!(
+            w,
+            "    dw {},{},{}",
+            self.liquid_y_start, self.liquid_y_target, self.liquid_y_speed
+        )?;
+        writeln!(
+            w,
+            "    db {},{},{},{},{},{},{},{}",
+            self.liquid_timer,
+            self.fx_type,
+            self.layer_blend1,
+            self.layer_blend2,
+            self.liquid_flags,
+            self.enabled_palette_anims,
+            self.enabled_tile_anims,
+            self.palette_blend_index
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Hash)]
+struct EnemyPopulation {
+    entries: Vec<EnemyPopulationEntry>,
+    kills_required: HexU8,
+}
+
+#[derive(Hash)]
+struct EnemyPopulationEntry {
+    enemy_header: HexU16, // label
+    pos_x: HexU16,
+    pos_y: HexU16,
+    init_param: HexU16, // "Tilemap", initial instruction list pointer, though in practice overriden by the AI init
+    flags1: HexU16,     // "Special", upper byte used by engine, lower used by enemy(?)
+    flags2: HexU16,     // "Graphics"
+    param1: HexU16,     // "Speed"
+    param2: HexU16,     // "Spaeed2",
+}
+
+impl EnemyPopulation {
+    fn from_xml(xml: &xml_types::EnemiesList) -> EnemyPopulation {
+        EnemyPopulation {
+            entries: xml
+                .enemy
+                .iter()
+                .map(|e| EnemyPopulationEntry {
+                    enemy_header: e.id,
+                    pos_x: e.x,
+                    pos_y: e.y,
+                    init_param: e.tilemap,
+                    flags1: e.special,
+                    flags2: e.gfx,
+                    param1: e.speed,
+                    param2: e.speed2,
+                })
+                .collect(),
+            kills_required: xml.kill_count,
+        }
+    }
+
+    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
+        for enemy in &self.entries {
+            writeln!(
+                w,
+                "    dw {}",
+                symbols.resolve_label(0xA0, enemy.enemy_header)
+            )?;
+            writeln!(
+                w,
+                "    dw {},{},{},{},{},{},{}",
+                enemy.pos_x,
+                enemy.pos_y,
+                enemy.init_param,
+                enemy.flags1,
+                enemy.flags2,
+                enemy.param1,
+                enemy.param2
+            )?;
+        }
+        writeln!(w, "    dw $FFFF : db {}", self.kills_required)?;
+        Ok(())
+    }
+}
+
+type EnemyGfxSet = Vec<EnemyGfxSetEntry>;
+
+#[derive(Hash)]
+struct EnemyGfxSetEntry {
+    enemy_header: HexU16, // label
+    palette_index_and_flags: HexU16,
+}
+
+impl EnemyGfxSetEntry {
+    fn from_xml(xml: &[xml_types::EnemyType]) -> EnemyGfxSet {
+        xml.iter()
+            .map(|e| EnemyGfxSetEntry {
+                enemy_header: e.gfx,
+                palette_index_and_flags: e.palette,
+            })
+            .collect()
+    }
+
+    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
+        writeln!(
+            w,
+            "    dw {},{}",
+            symbols.resolve_label(0xA0, self.enemy_header),
+            self.palette_index_and_flags
+        )?;
+        Ok(())
+    }
+}
+
+type ScrollData = Vec<HexU8>;
+
+enum ScrollDataKind {
+    /// Stores fixed scroll value minus one. (0 = $01, 1 = $02)
+    Fixed(HexU16),
+    Ref(OwningRef<ScrollData>),
+}
+
+impl ScrollDataKind {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &xml_types::ScrollData,
+        state_name: &str,
+    ) -> Result<ScrollDataKind> {
+        match (xml.const_, xml.data.is_empty()) {
+            (Some(fixed), true) => Ok(ScrollDataKind::Fixed(fixed)),
+            (None, false) => Ok(ScrollDataKind::Ref(
+                rom_data
+                    .room_scroll_data
+                    .insert(xml.data.clone(), format!("RoomScrolls_{state_name}")),
+            )),
+            _ => Err(anyhow!("ScrollData must be const or data, but not both")),
+        }
+    }
+}
+
+type PlmPopulation = Vec<PlmPopulationEntry>;
+
+#[derive(Hash)]
+struct PlmPopulationEntry {
+    plm_header: HexU16, // label
+    pos_x: HexU8,
+    pos_y: HexU8,
+    param: PlmParam,
+}
+
+#[derive(Hash)]
+enum PlmParam {
+    Value(HexU16),
+    ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
+}
+
+impl PlmPopulationEntry {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &[xml_types::Plm],
+        state_name: &str,
+    ) -> Result<PlmPopulation> {
+        xml.iter()
+            .enumerate()
+            .map(|(i, plm)| {
+                let param = match (plm.arg, &plm.scroll_data) {
+                    (Some(arg), None) => PlmParam::Value(arg),
+                    (None, Some(scroll_data)) => {
+                        let changes = scroll_data.entries.iter().map(From::from).collect();
+                        PlmParam::ScrollDataUpdate(
+                            rom_data
+                                .plm_param_scrolldata
+                                .insert(changes, format!("RoomPLM_{state_name}_PLM{i}")),
+                        )
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "PlmPopulationEntry must have only one kind of argument"
+                        ))
+                    }
+                };
+
+                Ok(PlmPopulationEntry {
+                    plm_header: plm.type_,
+                    pos_x: plm.x,
+                    pos_y: plm.y,
+                    param,
+                })
+            })
+            .collect::<Result<_>>()
+    }
+
+    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
+        write!(
+            w,
+            "    %PLMPopEntry({}, {}, {}, ",
+            symbols.resolve_label(0x84, self.plm_header),
+            self.pos_x,
+            self.pos_y
+        )?;
+        match &self.param {
+            PlmParam::Value(val) => writeln!(w, "{})", val)?,
+            PlmParam::ScrollDataUpdate(ref_) => writeln!(w, "{})", ref_.label())?,
+        }
+        Ok(())
+    }
+}
+
+type BgDataCommandList = Vec<BgDataCommand>;
+
+#[derive(Hash)]
+enum BgDataCommand {
+    CopyToVram(CopyCommandParams), // Command $2
+    Decompress {
+        // Command $4
+        source: BgDataSource,
+        dest: HexU16, // $7E address
+    },
+    ClearBg3,                         // Command $6
+    CopyToVramBg3(CopyCommandParams), // Command $8
+    ClearBg2,                         // Command $A
+    ClearBg2_2,                       // Command $C
+    DoorDependentCopyToVram {
+        // Command $E
+        // SMART doesn't really support this command, it doesn't try to repoint this value
+        from_door: HexU16,
+        copy_params: CopyCommandParams,
+    },
+}
+
+#[derive(Hash)]
+struct CopyCommandParams {
+    source: BgDataSource,
+    dest: HexU16, // VRAM address
+    size: HexU16,
+}
+
+#[derive(Hash)]
+enum BgDataSource {
+    Label(HexU24),
+    Ref(OwningRef<(Vec<u8>, bool)>),
+}
+
+fn copy_hexu16_to_u8(src: &[HexU16]) -> Vec<u8> {
+    src.iter().flat_map(|HexU16(x)| x.to_le_bytes()).collect()
+}
+
+impl BgDataCommand {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &[xml_types::BgDataEntry],
+        state_name: &str,
+    ) -> Result<Vec<BgDataCommand>> {
+        let mut entries = Vec::new();
+        for (i, c) in xml.iter().enumerate() {
+            let cmd_name = &format!("{state_name}_Cmd{i}");
+
+            let mut to_bg_data_source =
+                |data_or_addr: &xml_types::DataOrAddress, compressed: bool| -> BgDataSource {
+                    match data_or_addr {
+                        xml_types::DataOrAddress::Data(data) => {
+                            BgDataSource::Ref(rom_data.bgdata_tile_data.insert(
+                                (copy_hexu16_to_u8(data), compressed),
+                                format!("LibBG_{cmd_name}_Data"),
+                            ))
+                        }
+                        &xml_types::DataOrAddress::Address(l) => BgDataSource::Label(l),
+                    }
+                };
+
+            let mut make_copy_params = |source, dest, size| CopyCommandParams {
+                source: to_bg_data_source(source, false),
+                dest,
+                size,
+            };
+
+            entries.push(match *c {
+                xml_types::BgDataEntry::Copy {
+                    ref source,
+                    dest,
+                    size,
+                } => BgDataCommand::CopyToVram(make_copy_params(source, dest, size)),
+
+                xml_types::BgDataEntry::Decomp {
+                    ref source,
+                    dest,
+                    section: _,
+                } => BgDataCommand::Decompress {
+                    source: to_bg_data_source(source, true),
+                    dest,
+                },
+
+                xml_types::BgDataEntry::L3Copy {
+                    ref source,
+                    dest,
+                    size,
+                } => BgDataCommand::CopyToVramBg3(make_copy_params(source, dest, size)),
+
+                xml_types::BgDataEntry::Clear2 => BgDataCommand::ClearBg2,
+                xml_types::BgDataEntry::ClearAll => BgDataCommand::ClearBg2_2,
+
+                xml_types::BgDataEntry::DdbCopy {
+                    ddb,
+                    ref source,
+                    dest,
+                    size,
+                } => BgDataCommand::DoorDependentCopyToVram {
+                    from_door: ddb,
+                    copy_params: make_copy_params(source, dest, size),
+                },
+            });
+
+            if let xml_types::BgDataEntry::Decomp {
+                source,
+                dest,
+                section: Some(section),
+            } = c
+            {
+                let source_size_words = match source {
+                    DataOrAddress::Data(v) => v.len() as u16,
+                    _ => {
+                        return Err(anyhow!(
+                            "BgData command can only have Section if it has embedded data"
+                        ));
+                    }
+                };
+                let (section_start, section_size) = match section {
+                    DecompSection::GFX => (0x0, 0x4000),
+                    DecompSection::GFX3 => (0x4000, 0x800),
+                    DecompSection::Tiles2 => (0x4800, 0x800),
+                    DecompSection::Tiles1 => (0x5000, 0x800),
+                    DecompSection::Tiles3 => (0x5800, 0x800),
+                };
+                let mut offset = 0;
+                while offset < section_size {
+                    entries.push(BgDataCommand::CopyToVram(CopyCommandParams {
+                        source: BgDataSource::Label(HexU24(0x7E0000 + dest.0 as u32)),
+                        dest: HexU16(section_start + offset),
+                        size: HexU16(source_size_words * 2),
+                    }));
+                    offset += source_size_words;
+                }
+
+                if offset != section_size {
+                    return Err(anyhow!(
+                        "BgData data (size ${:X}) can not repeat evenly in Section (size ${:X})",
+                        source_size_words * 2,
+                        section_size
+                    ));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
+        let emit_source = |w: &mut Writer, source: &BgDataSource| match source {
+            BgDataSource::Label(addr) => {
+                write!(w, " : dl {}", symbols.resolve_label_long(*addr))
+            }
+            BgDataSource::Ref(ref_) => write!(w, " : dl {}", ref_.label()),
+        };
+        let emit_copy_params = |w: &mut Writer, params: &CopyCommandParams| {
+            emit_source(w, &params.source)?;
+            writeln!(w, " : dw {},{}", params.dest, params.size)
+        };
+
+        match self {
+            BgDataCommand::CopyToVram(copy_params) => {
+                write!(w, "    dw $0002")?;
+                emit_copy_params(w, copy_params)?;
+            }
+            BgDataCommand::Decompress { source, dest } => {
+                write!(w, "    dw $0004")?;
+                emit_source(w, source)?;
+                writeln!(w, " : dw {dest}")?;
+            }
+            BgDataCommand::ClearBg3 => writeln!(w, "    dw $0006")?,
+            BgDataCommand::CopyToVramBg3(copy_params) => {
+                write!(w, "    dw $0008")?;
+                emit_copy_params(w, copy_params)?;
+            }
+            BgDataCommand::ClearBg2 => writeln!(w, "    dw $000A")?,
+            BgDataCommand::ClearBg2_2 => writeln!(w, "    dw $000C")?,
+            BgDataCommand::DoorDependentCopyToVram {
+                from_door,
+                copy_params,
+            } => {
+                // sadly, broken pointer :(
+                write!(w, "    dw $000E : dw {from_door}")?;
+                emit_copy_params(w, copy_params)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct LoadStation {
+    room: RoomId,
+    from_door: DoorId,
+    unused: HexU16, // Bank logs call it "Door BTS" but that seems vestigial at best
+    screen_x: HexU16,
+    screen_y: HexU16,
+    samus_x: HexU16,
+    samus_y: HexU16,
+}
+
+impl LoadStation {
+    fn from_xml(
+        rom_data: &mut RomData,
+        xml: &xml_types::SaveRoom,
+        room_id: RoomId,
+    ) -> Result<(HexU8, LoadStation)> {
+        let from_door = (
+            (xml.indoor.room_area.0, xml.indoor.room_index.0),
+            xml.indoor.door_index.0,
+        );
+        Ok((
+            xml.saveindex,
+            LoadStation {
+                room: room_id,
+                from_door,
+                unused: xml.unused[0].unwrap_or(HexU16(0)),
+                screen_x: xml.screenx,
+                screen_y: xml.screeny,
+                samus_x: xml.samusx,
+                samus_y: xml.samusy,
+            },
+        ))
+    }
+}
+
+#[derive(Default)]
+struct RomData {
+    rooms: BTreeMap<RoomId, RoomHeader>,
+    doors: DataDeduper<ExitType>,
+    load_stations: BTreeMap<(HexU8, HexU8), LoadStation>, // key: (area index, load station index)
+
+    compressed_level_data: DataDeduper<Vec<u8>>,
+    fx_headers: DataDeduper<FxHeader>,
+    enemy_populations: DataDeduper<EnemyPopulation>,
+    enemy_gfx_sets: DataDeduper<EnemyGfxSet>,
+    room_scroll_data: DataDeduper<ScrollData>,
+    plm_populations: DataDeduper<PlmPopulation>,
+    plm_param_scrolldata: DataDeduper<Vec<ScrollDataChange>>,
+    bgdata_commands: DataDeduper<BgDataCommandList>,
+    bgdata_tile_data: DataDeduper<(Vec<u8>, bool)>, // bool true if data is compressed
+
+    doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
+    doorcode_raw: DataDeduper<Vec<CodeInstruction>>,
+}
+
+fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
+    println!("Parsing {}...", path.display());
+    let file = BufReader::new(File::open(path)?);
+    let parsed = quick_xml::de::from_reader(file)?;
+    Ok(parsed)
+}
+
+fn emit_asm(rom_data: &RomData, symbols: &SymbolMap, out_dir: &Path) -> Result<()> {
+    {
+        let mut f = File::create(out_dir.join("room_headers.asm"))?;
+        let mut w: Writer = BufWriter::new(&mut f);
+        for (room_id, room) in &rom_data.rooms {
+            writeln!(&mut w, "\nRoomHeader_{}:", &room.name)?;
+            room.emit_asm(&mut w, symbols)?;
+        }
+    }
+    {
+        let mut f = File::create(out_dir.join("door_headers.asm"))?;
+        let mut w: Writer = BufWriter::new(&mut f);
+        for e in rom_data.doors.entries() {
+            writeln!(&mut w)?;
+            for l in &e.labels {
+                writeln!(&mut w, "{l}:")?;
+            }
+            e.data.emit_asm(&mut w, symbols, &rom_data.rooms)?;
+        }
+    }
+    {
+        let mut f = File::create(out_dir.join("load_stations.asm"))?;
+        let mut w: Writer = BufWriter::new(&mut f);
+
+        let num_areas = rom_data
+            .load_stations
+            .last_key_value()
+            .map_or(0, |((area_id, _), _)| area_id.0 + 1);
+        writeln!(&mut w, "LoadStationListPointers:")?;
+        for i in 0..num_areas {
+            let mut area_range = rom_data
+                .load_stations
+                .range((HexU8(i), HexU8(0))..(HexU8(i + 1), HexU8(0)));
+            if area_range.next().is_some() {
+                writeln!(&mut w, "    dw LoadStations_Area{i}")?;
+            } else {
+                writeln!(&mut w, "    dw $0000")?;
+            }
+        }
+        for (area, stations) in &rom_data
+            .load_stations
+            .iter()
+            .chunk_by(|((area_id, _), _)| area_id)
+        {
+            writeln!(&mut w, "\nLoadStations_Area{}:", area.0)?;
+            let mut current_idx = 0;
+            for ((area_id, station_id), station) in stations {
+                while current_idx < station_id.0 {
+                    writeln!(&mut w, "    dw $0000,$0000")?;
+                    writeln!(&mut w, "    dw $0000,$0000,$0000,$0000,$0000 ; Unused")?;
+                    current_idx += 1;
+                }
+                let Some(target_room) = rom_data.rooms.get(&station.room) else {
+                    return Err(anyhow!(
+                        "Load station {} destination room (${:02X},${:02X}) not found",
+                        station_id,
+                        station.room.0,
+                        station.room.1,
+                    ));
+                };
+                let Some(from_door_room) = rom_data.rooms.get(&station.from_door.0) else {
+                    return Err(anyhow!(
+                        "Load station {} from_door room (${:02X},${:02X}) not found",
+                        station_id,
+                        station.from_door.0 .0,
+                        station.from_door.0 .1,
+                    ));
+                };
+                let Some(from_door_ref) = from_door_room.exits.get(station.from_door.1 as usize)
+                else {
+                    return Err(anyhow!(
+                        "Load station {} from_door exit ${:02X} not found",
+                        station_id,
+                        station.from_door.1,
+                    ));
+                };
+
+                writeln!(
+                    &mut w,
+                    "    dw RoomHeader_{}, {}",
+                    target_room.name,
+                    from_door_ref.label()
+                )?;
+                writeln!(
+                    &mut w,
+                    "    dw {},{},{},{},{} ; Station {}",
+                    station.unused,
+                    station.screen_x,
+                    station.screen_y,
+                    station.samus_y, // samus_y comes before samus_x for some reason
+                    station.samus_x,
+                    station_id,
+                )?;
+                current_idx += 1;
+            }
+        }
+    }
+    {
+        let mut f = File::create(out_dir.join("fx_headers.asm"))?;
+        rom_data
+            .fx_headers
+            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
+                // Empty FX should just generate a $0000 pointer instead of empty entry
+                assert!(!entry.is_empty());
+                for fx_entry in entry {
+                    fx_entry.emit_asm(w, symbols, &rom_data.rooms)?;
+                }
+                if entry.last().unwrap().from_door.is_some() {
+                    // If last FX entry isn't unconditional, then emit a list terminator
+                    writeln!(w, "    dw $FFFF")?;
+                }
+                Ok(())
+            })?;
+    }
+    {
+        let mut f = File::create(out_dir.join("enemy_populations.asm"))?;
+        rom_data
+            .enemy_populations
+            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
+                entry.emit_asm(w, symbols)
+            })?;
+    }
+    {
+        let mut f = File::create(out_dir.join("enemy_gfx_sets.asm"))?;
+        rom_data
+            .enemy_gfx_sets
+            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
+                for gfx_entry in entry {
+                    gfx_entry.emit_asm(w, symbols)?;
+                }
+                writeln!(w, "    dw $FFFF")?;
+                Ok(())
+            })?;
+    }
+    {
+        let mut f = File::create(out_dir.join("room_scroll_data.asm"))?;
+        rom_data.room_scroll_data.emit_asm_for_entries(
+            &mut BufWriter::new(&mut f),
+            |w, entry| {
+                for line in entry.chunks(16) {
+                    write!(w, "    db {}", line[0])?;
+                    for x in &line[1..] {
+                        write!(w, ",{}", x)?;
+                    }
+                    writeln!(w)?;
+                }
+                Ok(())
+            },
+        )?;
+    }
+    {
+        let mut f = File::create(out_dir.join("plm_populations.asm"))?;
+        rom_data.plm_populations.emit_asm_for_entries(
+            &mut BufWriter::new(&mut f),
+            |w, entry| {
+                for plm_entry in entry {
+                    plm_entry.emit_asm(w, symbols)?;
+                }
+                writeln!(w, "    dw $0000")?;
+                Ok(())
+            },
+        )?;
+    }
+    {
+        let mut f = File::create(out_dir.join("plm_param_scrolldata.asm"))?;
+        rom_data.plm_param_scrolldata.emit_asm_for_entries(
+            &mut BufWriter::new(&mut f),
+            |w, entry| {
+                for change in entry {
+                    writeln!(w, "    db {},{}", change.screen_index, change.value)?;
+                }
+                writeln!(w, "    db $80")?;
+                Ok(())
+            },
+        )?;
+    }
+    {
+        let mut f = File::create(out_dir.join("bgdata_commands.asm"))?;
+        rom_data.bgdata_commands.emit_asm_for_entries(
+            &mut BufWriter::new(&mut f),
+            |w, entry| {
+                for command in entry {
+                    command.emit_asm(w, symbols)?;
+                }
+                writeln!(w, "    dw $0000")?;
+                Ok(())
+            },
+        )?;
+    }
+    {
+        let mut f = File::create(out_dir.join("doorcode_scroll_updates.asm"))?;
+        rom_data
+            .doorcode_scroll_updates
+            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
+                emit_doorcode_asm_for_scrolldata_change(w, entry)
+            })?;
+    }
+    {
+        let mut f = File::create(out_dir.join("doorcode_raw.asm"))?;
+        rom_data
+            .doorcode_raw
+            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
+                for instruction in entry {
+                    write!(w, "    db {}", instruction.op)?;
+                    if let Some(arg) = instruction.arg {
+                        write!(w, " : {} {}", arg.data_directive(), arg)?;
+                    }
+                    writeln!(w)?;
+                }
+                Ok(())
+            })?;
+    }
+
+    println!("Writing and compressing binary data...");
+    let mut compression_queue = Vec::new();
+
+    {
+        let mut f = File::create(out_dir.join("level_data.asm"))?;
+        let data_dir = out_dir.join("level_data");
+        fs::create_dir_all(&data_dir)?;
+
+        rom_data
+            .compressed_level_data
+            .emit_asm_for_entries_with_metadata(&mut BufWriter::new(&mut f), |w, entry| {
+                let filename = format!("{}.bin", entry.labels[0]);
+                let path = data_dir.join(&filename);
+                if write_file_if_not_matching(&path, &entry.data)? {
+                    compression_queue.push(path);
+                }
+
+                writeln!(w, "    incbin \"level_data/{filename}.lz5\"")?;
+                Ok(())
+            })?;
+    }
+    {
+        let mut f = File::create(out_dir.join("bgdata_data.asm"))?;
+        let data_dir = out_dir.join("bgdata_data");
+        fs::create_dir_all(&data_dir)?;
+
+        rom_data
+            .bgdata_tile_data
+            .emit_asm_for_entries_with_metadata(&mut BufWriter::new(&mut f), |w, entry| {
+                let filename = format!("{}.bin", entry.labels[0]);
+                let path = data_dir.join(&filename);
+
+                if entry.data.1 {
+                    if write_file_if_not_matching(&path, &entry.data.0)? {
+                        compression_queue.push(path);
+                    }
+                    writeln!(w, "    incbin \"bgdata_data/{filename}.lz5\"")?;
+                } else {
+                    fs::write(&path, &entry.data.0)?;
+                    writeln!(w, "    incbin \"bgdata_data/{filename}\"")?;
+                }
+                Ok(())
+            })?;
+    }
+
+    // TODO: Parallelize
+    for f in compression_queue {
+        println!("Compressing {}...", f.display());
+        compress_lz5_file(&f)?;
+    }
+    Ok(())
+}
+
+fn write_file_if_not_matching(path: &Path, data: &[u8]) -> Result<bool> {
+    let update_needed = if let Ok(existing_data) = fs::read(path) {
+        let mut hasher = DefaultHasher::new();
+        existing_data.hash(&mut hasher);
+        let existing_hash = hasher.finish();
+
+        let mut hasher = DefaultHasher::new();
+        data.hash(&mut hasher);
+        let new_hash = hasher.finish();
+
+        new_hash != existing_hash
+    } else {
+        true
+    };
+
+    if update_needed {
+        fs::write(path, data)?;
+    }
+    Ok(update_needed)
+}
+
+fn compress_lz5_file(path: &Path) -> Result<()> {
+    let status = Command::new("./AmoebaCompress.exe")
+        .arg("-c") // Compress
+        .arg("-f") // Input file
+        .arg(path)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("AmoebaCompress returned with status {}", status))
+    }
+}
+
+fn main() -> Result<()> {
+    let mut rooms = BTreeMap::new();
+
+    for entry in glob("../smart_xml/Export/Rooms/*.xml")? {
+        let path = match entry {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("Failed to read path: {}", e);
+                continue;
+            }
+        };
+
+        use heck::ToUpperCamelCase;
+
+        let room_name = path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_upper_camel_case();
+        let room = read_room_xml(path)?;
+
+        match rooms.entry((room.area, room.index)) {
+            Entry::Vacant(e) => {
+                e.insert((room_name, room));
+            }
+            Entry::Occupied(e) => {
+                let (area_index, room_index) = e.key();
+                let old_name = &e.get().0;
+                panic!("Duplicate rooms with id ({area_index},{room_index}): \"{old_name}\" and \"{room_name}\"")
+            }
+        }
+    }
+    println!("Loaded {} rooms.", rooms.len());
+
+    println!("Loading symbol map...");
+    let symbols = SymbolMap::from_wla_sym(File::open("../vanilla.sym")?)?;
+
+    let mut rom_data = RomData::default();
+    for ((area_index, room_index), (room_name, xml_room)) in rooms {
+        println!("Processing room ({area_index},{room_index}) {room_name}...");
+        let (room_id, room) = RoomHeader::from_xml(&mut rom_data, &xml_room, room_name)?;
+        rom_data.rooms.insert(room_id, room);
+    }
+    emit_asm(&rom_data, &symbols, Path::new("../src/converted/"))?;
+
+    Ok(())
+}
