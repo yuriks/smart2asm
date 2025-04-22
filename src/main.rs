@@ -1,7 +1,7 @@
 use crate::asm::SymbolMap;
 use crate::hex_types::{HexU16, HexU24, HexU8, HexValue};
 use crate::xml_types::{DataOrAddress, DecompSection};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use glob::glob;
 use itertools::Itertools;
 use std::collections::btree_map::Entry;
@@ -75,7 +75,7 @@ impl<T: Hash> DataDeduper<T> {
         OwningRef(id, label, PhantomData)
     }
 
-    fn get(&self, id: OwningRef<T>) -> Option<&DeduperEntry<T>> {
+    fn _get(&self, id: OwningRef<T>) -> Option<&DeduperEntry<T>> {
         self.entries.get(id.0)
     }
 }
@@ -642,7 +642,7 @@ struct FxHeaderEntry {
 }
 
 impl FxHeaderEntry {
-    fn from_xml(rom_data: &mut RomData, xml: &[xml_types::Fx1]) -> Result<Option<FxHeader>> {
+    fn from_xml(_rom_data: &mut RomData, xml: &[xml_types::Fx1]) -> Result<Option<FxHeader>> {
         if xml.is_empty() {
             return Ok(None);
         }
@@ -690,7 +690,7 @@ impl FxHeaderEntry {
     fn emit_asm(
         &self,
         w: &mut Writer,
-        symbols: &SymbolMap,
+        _symbols: &SymbolMap,
         rooms: &BTreeMap<RoomId, RoomHeader>,
     ) -> Result<()> {
         write!(w, "    dw ")?;
@@ -923,7 +923,7 @@ enum BgDataCommand {
         source: BgDataSource,
         dest: HexU16, // $7E address
     },
-    ClearBg3,                         // Command $6
+    _ClearBg3,                        // Command $6
     CopyToVramBg3(CopyCommandParams), // Command $8
     ClearBg2,                         // Command $A
     ClearBg2_2,                       // Command $C
@@ -1082,7 +1082,7 @@ impl BgDataCommand {
                 emit_source(w, source)?;
                 writeln!(w, " : dw {dest}")?;
             }
-            BgDataCommand::ClearBg3 => writeln!(w, "    dw $0006")?,
+            BgDataCommand::_ClearBg3 => writeln!(w, "    dw $0006")?,
             BgDataCommand::CopyToVramBg3(copy_params) => {
                 write!(w, "    dw $0008")?;
                 emit_copy_params(w, copy_params)?;
@@ -1114,7 +1114,7 @@ struct LoadStation {
 
 impl LoadStation {
     fn from_xml(
-        rom_data: &mut RomData,
+        _rom_data: &mut RomData,
         xml: &xml_types::SaveRoom,
         room_id: RoomId,
     ) -> Result<(HexU8, LoadStation)> {
@@ -1168,7 +1168,7 @@ fn emit_asm(rom_data: &RomData, symbols: &SymbolMap, out_dir: &Path) -> Result<(
     {
         let mut f = File::create(out_dir.join("room_headers.asm"))?;
         let mut w: Writer = BufWriter::new(&mut f);
-        for (room_id, room) in &rom_data.rooms {
+        for (_room_id, room) in &rom_data.rooms {
             writeln!(&mut w, "\nRoomHeader_{}:", &room.name)?;
             room.emit_asm(&mut w, symbols)?;
         }
@@ -1210,7 +1210,7 @@ fn emit_asm(rom_data: &RomData, symbols: &SymbolMap, out_dir: &Path) -> Result<(
         {
             writeln!(&mut w, "\nLoadStations_Area{}:", area.0)?;
             let mut current_idx = 0;
-            for ((area_id, station_id), station) in stations {
+            for ((_area_id, station_id), station) in stations {
                 while current_idx < station_id.0 {
                     writeln!(&mut w, "    dw $0000,$0000")?;
                     writeln!(&mut w, "    dw $0000,$0000,$0000,$0000,$0000 ; Unused")?;

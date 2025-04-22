@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_crateria_pbs_room() {
-        let room_: Room = from_str(CRATERIA_PB_ROOM_XML).unwrap();
+        let _room: Room = from_str(CRATERIA_PB_ROOM_XML).unwrap();
         //eprintln!("{:#?}", room);
     }
 
@@ -467,13 +467,13 @@ mod tests {
 
     #[test]
     fn test_landing_site_room() {
-        let room_: Room = from_str(LANDING_SITE_XML).unwrap();
+        let _room: Room = from_str(LANDING_SITE_XML).unwrap();
         //eprintln!("{:#?}", room);
     }
 
     #[test]
     fn test_landing_site_room_buf() {
-        let room_: Room = from_reader(LANDING_SITE_XML.as_bytes()).unwrap();
+        let _room: Room = from_reader(LANDING_SITE_XML.as_bytes()).unwrap();
         //eprintln!("{:#?}", room);
     }
 }
