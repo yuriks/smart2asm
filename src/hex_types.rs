@@ -1,8 +1,9 @@
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
+use minijinja::value::Object;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -48,7 +49,17 @@ impl FromStr for HexU8 {
     type Err = std::num::ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        u8::from_str_radix(s, 16).map(HexU8)
+        let trimmed = s.strip_prefix('$').unwrap_or(s);
+        u8::from_str_radix(trimmed, 16).map(HexU8)
+    }
+}
+
+impl Serialize for HexU8 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+        serializer.collect_str(self)
     }
 }
 
@@ -61,6 +72,8 @@ impl<'de> Deserialize<'de> for HexU8 {
         FromStr::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
+
+impl Object for HexU8 {}
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -106,7 +119,17 @@ impl FromStr for HexU16 {
     type Err = std::num::ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        u16::from_str_radix(s, 16).map(HexU16)
+        let trimmed = s.strip_prefix('$').unwrap_or(s);
+        u16::from_str_radix(trimmed, 16).map(HexU16)
+    }
+}
+
+impl Serialize for HexU16 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+        serializer.collect_str(self)
     }
 }
 
@@ -119,6 +142,8 @@ impl<'de> Deserialize<'de> for HexU16 {
         FromStr::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
+
+impl Object for HexU16 {}
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -177,6 +202,8 @@ impl<'de> Deserialize<'de> for HexU24 {
         FromStr::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
+
+impl Object for HexU24 {}
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub enum HexValue {

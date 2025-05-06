@@ -1,8 +1,11 @@
 use crate::hex_types::{HexU16, HexU24};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
+use minijinja::{value, Error, State, Value};
+use minijinja::value::{Object, ViaDeserialize};
 
 pub enum LookupResult<'a, T> {
     Label(&'a str),
@@ -18,6 +21,16 @@ impl<T: Display> Display for LookupResult<'_, T> {
     }
 }
 
+impl<T: Object + 'static> From<LookupResult<'_, T>> for Value {
+    fn from(value: LookupResult<T>) -> Value {
+        match value {
+            LookupResult::Label(l) => l.into(),
+            LookupResult::NotFound(a) => Value::from_object(a),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct SymbolMap {
     addr_to_label: HashMap<u32, String>,
 }
@@ -91,6 +104,22 @@ impl SymbolMap {
         match self.addr_to_label.get(&addr.0) {
             Some(l) => LookupResult::Label(l),
             None => LookupResult::NotFound(addr),
+        }
+    }
+}
+
+impl Object for SymbolMap {
+    fn call_method(self: &Arc<Self>, _state: &State, method: &str, args: &[Value]) -> Result<Value, Error> {
+        match method {
+            "resolve_label" => {
+                let (bank, ViaDeserialize(addr)) = value::from_args(args)?;
+                Ok(Value::from(self.resolve_label(bank, addr)))
+            },
+            "resolve_label_long" => {
+                let (ViaDeserialize(addr),) = value::from_args(args)?;
+                Ok(Value::from(self.resolve_label_long(addr)))
+            },
+            _ => Err(Error::from(minijinja::ErrorKind::UnknownMethod)),
         }
     }
 }

@@ -1,0 +1,12 @@
+; Enemy Populations
+{% for labels, population in data.enemy_populations %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% for e in population.entries %}
+    dw {{ symbols.resolve_label(0xA0, e.enemy_header) }}
+    dw {{ e.pos_x }},{{ e.pos_y }},{{ e.init_param }},{{ e.flags1 }},{{ e.flags2 }},{{ e.param1 }},{{ e.param2 }}
+{% endfor %}
+    dw $FFFF : db {{ population.kills_required }}
+{% endfor %}

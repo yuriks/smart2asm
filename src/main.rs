@@ -6,6 +6,7 @@ use glob::glob;
 use itertools::Itertools;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Debug;
 use std::fs;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -13,11 +14,17 @@ use std::io::{BufReader, BufWriter, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use minijinja::{context, Environment, UndefinedBehavior, Value};
+use minijinja::value::{Enumerator, Object, ObjectExt};
+use serde::{Serialize, Serializer};
+use serde::ser::SerializeSeq;
 
 mod asm;
 mod hex_types;
 mod xml_types;
 
+#[derive(Debug)]
 struct DeduperEntry<T> {
     data: T,
     labels: Vec<String>,
@@ -38,6 +45,7 @@ impl<T> Hash for OwningRef<T> {
     }
 }
 
+#[derive(Debug)]
 struct DataDeduper<T> {
     entries: Vec<DeduperEntry<T>>,
     hash_to_id: HashMap<u64, usize>,
@@ -104,6 +112,27 @@ impl<T> DataDeduper<T> {
             f(w, e)?;
         }
         Ok(())
+    }
+}
+
+impl<T: Serialize> Serialize for DataDeduper<T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+        let mut seq = serializer.serialize_seq(Some(self.entries.len()))?;
+        for e in &self.entries {
+            seq.serialize_element(&(&e.labels, &e.data))?;
+        }
+        seq.end()
+    }
+}
+
+impl<T: Debug + Sync + Send + Serialize + 'static> Object for DataDeduper<T> {
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        self.mapped_enumerator(|this| {
+            Box::new(this.entries.iter().map(|e| Value::from_object(vec![Value::from_object(e.labels.clone())])))
+        })
     }
 }
 
@@ -727,13 +756,13 @@ impl FxHeaderEntry {
     }
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 struct EnemyPopulation {
     entries: Vec<EnemyPopulationEntry>,
     kills_required: HexU8,
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 struct EnemyPopulationEntry {
     enemy_header: HexU16, // label
     pos_x: HexU16,
@@ -764,29 +793,6 @@ impl EnemyPopulation {
                 .collect(),
             kills_required: xml.kill_count,
         }
-    }
-
-    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
-        for enemy in &self.entries {
-            writeln!(
-                w,
-                "    dw {}",
-                symbols.resolve_label(0xA0, enemy.enemy_header)
-            )?;
-            writeln!(
-                w,
-                "    dw {},{},{},{},{},{},{}",
-                enemy.pos_x,
-                enemy.pos_y,
-                enemy.init_param,
-                enemy.flags1,
-                enemy.flags2,
-                enemy.param1,
-                enemy.param2
-            )?;
-        }
-        writeln!(w, "    dw $FFFF : db {}", self.kills_required)?;
-        Ok(())
     }
 }
 
@@ -1137,23 +1143,36 @@ impl LoadStation {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 struct RomData {
+    #[serde(skip)]
     rooms: BTreeMap<RoomId, RoomHeader>,
+    #[serde(skip)]
     doors: DataDeduper<ExitType>,
+    #[serde(skip)]
     load_stations: BTreeMap<(HexU8, HexU8), LoadStation>, // key: (area index, load station index)
 
+    #[serde(skip)]
     compressed_level_data: DataDeduper<Vec<u8>>,
+    #[serde(skip)]
     fx_headers: DataDeduper<FxHeader>,
     enemy_populations: DataDeduper<EnemyPopulation>,
+    #[serde(skip)]
     enemy_gfx_sets: DataDeduper<EnemyGfxSet>,
+    #[serde(skip)]
     room_scroll_data: DataDeduper<ScrollData>,
+    #[serde(skip)]
     plm_populations: DataDeduper<PlmPopulation>,
+    #[serde(skip)]
     plm_param_scrolldata: DataDeduper<Vec<ScrollDataChange>>,
+    #[serde(skip)]
     bgdata_commands: DataDeduper<BgDataCommandList>,
+    #[serde(skip)]
     bgdata_tile_data: DataDeduper<(Vec<u8>, bool)>, // bool true if data is compressed
 
+    #[serde(skip)]
     doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
+    #[serde(skip)]
     doorcode_raw: DataDeduper<Vec<CodeInstruction>>,
 }
 
@@ -1164,7 +1183,14 @@ fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
     Ok(parsed)
 }
 
-fn emit_asm(rom_data: &RomData, symbols: &SymbolMap, out_dir: &Path) -> Result<()> {
+fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
+    let symbols = symbols_arc.as_ref();
+    let mut env = Environment::new();
+    env.set_loader(minijinja::path_loader("templates"));
+    env.set_trim_blocks(true);
+    env.set_undefined_behavior(UndefinedBehavior::Strict);
+    env.add_global("symbols", Value::from_dyn_object(symbols_arc.clone()));
+
     {
         let mut f = File::create(out_dir.join("room_headers.asm"))?;
         let mut w: Writer = BufWriter::new(&mut f);
@@ -1279,12 +1305,9 @@ fn emit_asm(rom_data: &RomData, symbols: &SymbolMap, out_dir: &Path) -> Result<(
             })?;
     }
     {
+        let template = env.get_template("enemy_populations.asm.j2")?;
         let mut f = File::create(out_dir.join("enemy_populations.asm"))?;
-        rom_data
-            .enemy_populations
-            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
-                entry.emit_asm(w, symbols)
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let mut f = File::create(out_dir.join("enemy_gfx_sets.asm"))?;
@@ -1507,7 +1530,7 @@ fn main() -> Result<()> {
         let (room_id, room) = RoomHeader::from_xml(&mut rom_data, &xml_room, room_name)?;
         rom_data.rooms.insert(room_id, room);
     }
-    emit_asm(&rom_data, &symbols, Path::new("../src/converted/"))?;
+    emit_asm(&rom_data, Arc::new(symbols), Path::new("../src/converted/"))?;
 
     Ok(())
 }
