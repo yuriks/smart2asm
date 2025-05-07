@@ -1,4 +1,4 @@
-use crate::hex_types::{HexU16, HexU24, HexU8, HexValue};
+use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use quick_xml::impl_deserialize_for_internally_tagged_enum;
 use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Deserializer};

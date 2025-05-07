@@ -1,13 +1,16 @@
 use crate::asm::SymbolMap;
-use crate::hex_types::{HexU16, HexU24, HexU8, HexValue};
+use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::xml_types::{DataOrAddress, DecompSection};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use glob::glob;
 use itertools::Itertools;
+use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr};
+use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context};
+use serde::ser::SerializeSeq;
+use serde::{Serialize, Serializer};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
-use std::{fs, io};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufReader, BufWriter, Write};
@@ -15,10 +18,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use minijinja::{context, Environment, ErrorKind, State, UndefinedBehavior, Value};
-use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr};
-use serde::{Serialize, Serializer};
-use serde::ser::SerializeSeq;
+use std::{fs, io};
 
 mod asm;
 mod hex_types;
@@ -118,7 +118,7 @@ impl<T> DataDeduper<T> {
 impl<T: Serialize> Serialize for DataDeduper<T> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         let mut seq = serializer.serialize_seq(Some(self.entries.len()))?;
         for e in &self.entries {
@@ -131,7 +131,11 @@ impl<T: Serialize> Serialize for DataDeduper<T> {
 impl<T: Debug + Sync + Send + Serialize + 'static> Object for DataDeduper<T> {
     fn enumerate(self: &Arc<Self>) -> Enumerator {
         self.mapped_enumerator(|this| {
-            Box::new(this.entries.iter().map(|e| Value::from_object(vec![Value::from_object(e.labels.clone())])))
+            Box::new(
+                this.entries
+                    .iter()
+                    .map(|e| Value::from_object(vec![Value::from_object(e.labels.clone())])),
+            )
         })
     }
 }
@@ -663,7 +667,7 @@ impl FxHeaderEntry {
                     _ => {
                         return Err(anyhow!(
                             "Fx1 `default` and door reference are mutually exclusive"
-                        ))
+                        ));
                     }
                 };
                 if from_door.is_none() != (i == xml.len() - 1) {
@@ -703,8 +707,8 @@ impl FxHeaderEntry {
             let Some(target_room) = rooms.get(&door_id.0) else {
                 return Err(anyhow!(
                     "FX from_door room ({:02X},${:02X}) not found",
-                    door_id.0 .0,
-                    door_id.0 .1,
+                    door_id.0.0,
+                    door_id.0.1,
                 ));
             };
             writeln!(w, "Door_{}_{}", target_room.name, door_id.1)?;
@@ -855,7 +859,7 @@ impl PlmPopulationEntry {
                     _ => {
                         return Err(anyhow!(
                             "PlmPopulationEntry must have only one kind of argument"
-                        ))
+                        ));
                     }
                 };
 
@@ -1155,16 +1159,25 @@ impl Object for TemplateInternalState {
 }
 
 fn get_internal_state(state: &State) -> Result<Arc<TemplateInternalState>, minijinja::Error> {
-    Ok(state.lookup("INTERNAL").and_then(|v| v.downcast_object()).unwrap())
+    Ok(state
+        .lookup("INTERNAL")
+        .and_then(|v| v.downcast_object())
+        .unwrap())
 }
 
-fn write_file_filter(state: &State, data: Vec<u8>, path: String, kwargs: Kwargs) -> Result<String, minijinja::Error> {
+fn write_file_filter(
+    state: &State,
+    data: Vec<u8>,
+    path: String,
+    kwargs: Kwargs,
+) -> Result<String, minijinja::Error> {
     let internal_state = get_internal_state(state)?;
     let full_path = internal_state.out_dir.join(&path);
 
-    fs::create_dir_all(full_path.parent().unwrap()).map_err(
-        |e| minijinja::Error::new(ErrorKind::WriteFailure, "failed to create directories")
-            .with_source(e))?;
+    fs::create_dir_all(full_path.parent().unwrap()).map_err(|e| {
+        minijinja::Error::new(ErrorKind::WriteFailure, "failed to create directories")
+            .with_source(e)
+    })?;
 
     if let Some(true) = kwargs.get("compress")? {
         let compressed_path = {
@@ -1173,17 +1186,21 @@ fn write_file_filter(state: &State, data: Vec<u8>, path: String, kwargs: Kwargs)
             PathBuf::from(s)
         };
 
-        let changed = write_file_if_not_matching(&full_path, &data).map_err(
-            |e| minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file")
-                .with_source(e))?;
+        let changed = write_file_if_not_matching(&full_path, &data).map_err(|e| {
+            minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file").with_source(e)
+        })?;
         if changed || !compressed_path.exists() {
-            internal_state.compression_queue.lock().unwrap().push(full_path);
+            internal_state
+                .compression_queue
+                .lock()
+                .unwrap()
+                .push(full_path);
         }
         Ok(path + ".lz5")
     } else {
-        fs::write(full_path, &data).map_err(
-            |e| minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file")
-                .with_source(e))?;
+        fs::write(full_path, &data).map_err(|e| {
+            minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file").with_source(e)
+        })?;
         Ok(path)
     }
 }
@@ -1269,8 +1286,8 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
                     return Err(anyhow!(
                         "Load station {} from_door room (${:02X},${:02X}) not found",
                         station_id,
-                        station.from_door.0 .0,
-                        station.from_door.0 .1,
+                        station.from_door.0.0,
+                        station.from_door.0.1,
                     ));
                 };
                 let Some(from_door_ref) = from_door_room.exits.get(station.from_door.1 as usize)
@@ -1458,7 +1475,9 @@ fn main() -> Result<()> {
             Entry::Occupied(e) => {
                 let (area_index, room_index) = e.key();
                 let old_name = &e.get().0;
-                panic!("Duplicate rooms with id ({area_index},{room_index}): \"{old_name}\" and \"{room_name}\"")
+                panic!(
+                    "Duplicate rooms with id ({area_index},{room_index}): \"{old_name}\" and \"{room_name}\""
+                )
             }
         }
     }

@@ -1,12 +1,12 @@
 use crate::hex_types::{HexU16, HexU24};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use minijinja::value::{Object, ViaDeserialize};
+use minijinja::{Error, State, Value, value};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::Arc;
-use minijinja::{value, Error, State, Value};
-use minijinja::value::{Object, ViaDeserialize};
-use serde::Serialize;
 
 pub enum LookupResult<'a, T> {
     Label(&'a str),
@@ -110,16 +110,21 @@ impl SymbolMap {
 }
 
 impl Object for SymbolMap {
-    fn call_method(self: &Arc<Self>, _state: &State, method: &str, args: &[Value]) -> Result<Value, Error> {
+    fn call_method(
+        self: &Arc<Self>,
+        _state: &State,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Value, Error> {
         match method {
             "resolve_label" => {
                 let (bank, ViaDeserialize(addr)) = value::from_args(args)?;
                 Ok(Value::from(self.resolve_label(bank, addr)))
-            },
+            }
             "resolve_label_long" => {
                 let (ViaDeserialize(addr),) = value::from_args(args)?;
                 Ok(Value::from(self.resolve_label_long(addr)))
-            },
+            }
             _ => Err(Error::from(minijinja::ErrorKind::UnknownMethod)),
         }
     }

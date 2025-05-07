@@ -1,4 +1,6 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use minijinja::value::{Object, ObjectRepr};
+use minijinja::{Error, State, Value, value};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
@@ -6,13 +8,10 @@ use std::marker::PhantomData;
 use std::num::TryFromIntError;
 use std::str::FromStr;
 use std::sync::Arc;
-use minijinja::{value, Error, State, Value};
-use minijinja::value::{Object, ObjectRepr};
-use serde::de::Visitor;
 
 struct HexDeserializeVisitor<T>(PhantomData<fn() -> T>);
 
-impl<'de, T: FromStr + TryFrom<u64>> Visitor<'de> for HexDeserializeVisitor<T>
+impl<'de, T: FromStr + TryFrom<u64>> de::Visitor<'de> for HexDeserializeVisitor<T>
 where
     <T as FromStr>::Err: Display,
     <T as TryFrom<u64>>::Error: Display,
@@ -25,14 +24,13 @@ where
 
     fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
     where
-        E: serde::de::Error
+        E: de::Error,
     {
-        T::try_from(v).map_err(serde::de::Error::custom)
+        T::try_from(v).map_err(de::Error::custom)
     }
 
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E>
-    {
-        FromStr::from_str(v).map_err(serde::de::Error::custom)
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        FromStr::from_str(v).map_err(de::Error::custom)
     }
 }
 
@@ -96,7 +94,7 @@ impl FromStr for HexU8 {
 impl Serialize for HexU8 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         serializer.collect_str(self)
     }
@@ -171,7 +169,7 @@ impl FromStr for HexU16 {
 impl Serialize for HexU16 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         serializer.collect_str(self)
     }
@@ -246,7 +244,7 @@ impl FromStr for HexU24 {
 impl Serialize for HexU24 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         serializer.collect_str(self)
     }
@@ -349,7 +347,7 @@ impl FromStr for HexValue {
 impl Serialize for HexValue {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         Value::from_object(*self).serialize(serializer)
     }
@@ -361,7 +359,7 @@ impl<'de> Deserialize<'de> for HexValue {
         D: Deserializer<'de>,
     {
         let s: Cow<str> = Deserialize::deserialize(deserializer)?;
-        FromStr::from_str(&s).map_err(serde::de::Error::custom)
+        FromStr::from_str(&s).map_err(de::Error::custom)
     }
 }
 
@@ -370,7 +368,12 @@ impl Object for HexValue {
         ObjectRepr::Plain
     }
 
-    fn call_method(self: &Arc<Self>, _state: &State<'_, '_>, method: &str, args: &[Value]) -> Result<Value, Error> {
+    fn call_method(
+        self: &Arc<Self>,
+        _state: &State<'_, '_>,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Value, Error> {
         match method {
             "data_directive" => {
                 let () = value::from_args(args)?;
