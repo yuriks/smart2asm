@@ -1,0 +1,9 @@
+; Background Tile Data
+{% for labels, bgdata in data.bgdata_tile_data %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+    {% set path = "bgdata_data/" + labels | first + ".bin" %}
+    incbin "{{ bgdata[0] | write_file(path, compress=bgdata[1]) }}"
+{% endfor %}

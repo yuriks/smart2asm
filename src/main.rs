@@ -7,16 +7,16 @@ use itertools::Itertools;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
-use std::fs;
+use std::{fs, io};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufReader, BufWriter, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use minijinja::{context, Environment, UndefinedBehavior, Value};
-use minijinja::value::{Enumerator, Object, ObjectExt};
+use std::sync::{Arc, Mutex};
+use minijinja::{context, Environment, ErrorKind, State, UndefinedBehavior, Value};
+use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr};
 use serde::{Serialize, Serializer};
 use serde::ser::SerializeSeq;
 
@@ -1118,7 +1118,6 @@ struct RomData {
     #[serde(skip)]
     load_stations: BTreeMap<(HexU8, HexU8), LoadStation>, // key: (area index, load station index)
 
-    #[serde(skip)]
     compressed_level_data: DataDeduper<Vec<u8>>,
     #[serde(skip)]
     fx_headers: DataDeduper<FxHeader>,
@@ -1130,7 +1129,6 @@ struct RomData {
     plm_param_scrolldata: DataDeduper<Vec<ScrollDataChange>>,
     #[serde(skip)]
     bgdata_commands: DataDeduper<BgDataCommandList>,
-    #[serde(skip)]
     bgdata_tile_data: DataDeduper<(Vec<u8>, bool)>, // bool true if data is compressed
 
     doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
@@ -1144,14 +1142,69 @@ fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
     Ok(parsed)
 }
 
+#[derive(Debug)]
+struct TemplateInternalState {
+    compression_queue: Mutex<Vec<PathBuf>>,
+    out_dir: PathBuf,
+}
+
+impl Object for TemplateInternalState {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Plain
+    }
+}
+
+fn get_internal_state(state: &State) -> Result<Arc<TemplateInternalState>, minijinja::Error> {
+    Ok(state.lookup("INTERNAL").and_then(|v| v.downcast_object()).unwrap())
+}
+
+fn write_file_filter(state: &State, data: Vec<u8>, path: String, kwargs: Kwargs) -> Result<String, minijinja::Error> {
+    let internal_state = get_internal_state(state)?;
+    let full_path = internal_state.out_dir.join(&path);
+
+    fs::create_dir_all(full_path.parent().unwrap()).map_err(
+        |e| minijinja::Error::new(ErrorKind::WriteFailure, "failed to create directories")
+            .with_source(e))?;
+
+    if let Some(true) = kwargs.get("compress")? {
+        let compressed_path = {
+            let mut s = full_path.clone().into_os_string();
+            s.push(".lz5");
+            PathBuf::from(s)
+        };
+
+        let changed = write_file_if_not_matching(&full_path, &data).map_err(
+            |e| minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file")
+                .with_source(e))?;
+        if changed || !compressed_path.exists() {
+            internal_state.compression_queue.lock().unwrap().push(full_path);
+        }
+        Ok(path + ".lz5")
+    } else {
+        fs::write(full_path, &data).map_err(
+            |e| minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file")
+                .with_source(e))?;
+        Ok(path)
+    }
+}
+
 fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
     let symbols = symbols_arc.as_ref();
+
+    let internal_state = Arc::new(TemplateInternalState {
+        compression_queue: Default::default(),
+        out_dir: out_dir.to_path_buf(),
+    });
+
     let mut env = Environment::new();
     env.set_loader(minijinja::path_loader("templates"));
     env.set_trim_blocks(true);
+    env.set_lstrip_blocks(true);
     env.set_undefined_behavior(UndefinedBehavior::Strict);
-    env.add_filter("data_directive", HexValue::data_directive);
+    env.add_global("INTERNAL", Value::from_dyn_object(internal_state.clone()));
     env.add_global("symbols", Value::from_dyn_object(symbols_arc.clone()));
+    env.add_filter("data_directive", HexValue::data_directive);
+    env.add_filter("write_file", write_file_filter);
 
     {
         let mut f = File::create(out_dir.join("room_headers.asm"))?;
@@ -1323,59 +1376,27 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
         template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     println!("Writing and compressing binary data...");
-    let mut compression_queue = Vec::new();
 
     {
+        let template = env.get_template("level_data.asm.j2")?;
         let mut f = File::create(out_dir.join("level_data.asm"))?;
-        let data_dir = out_dir.join("level_data");
-        fs::create_dir_all(&data_dir)?;
-
-        rom_data
-            .compressed_level_data
-            .emit_asm_for_entries_with_metadata(&mut BufWriter::new(&mut f), |w, entry| {
-                let filename = format!("{}.bin", entry.labels[0]);
-                let path = data_dir.join(&filename);
-                if write_file_if_not_matching(&path, &entry.data)? {
-                    compression_queue.push(path);
-                }
-
-                writeln!(w, "    incbin \"level_data/{filename}.lz5\"")?;
-                Ok(())
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("bgdata_data.asm.j2")?;
         let mut f = File::create(out_dir.join("bgdata_data.asm"))?;
-        let data_dir = out_dir.join("bgdata_data");
-        fs::create_dir_all(&data_dir)?;
-
-        rom_data
-            .bgdata_tile_data
-            .emit_asm_for_entries_with_metadata(&mut BufWriter::new(&mut f), |w, entry| {
-                let filename = format!("{}.bin", entry.labels[0]);
-                let path = data_dir.join(&filename);
-
-                if entry.data.1 {
-                    if write_file_if_not_matching(&path, &entry.data.0)? {
-                        compression_queue.push(path);
-                    }
-                    writeln!(w, "    incbin \"bgdata_data/{filename}.lz5\"")?;
-                } else {
-                    fs::write(&path, &entry.data.0)?;
-                    writeln!(w, "    incbin \"bgdata_data/{filename}\"")?;
-                }
-                Ok(())
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
 
     // TODO: Parallelize
-    for f in compression_queue {
+    for f in internal_state.compression_queue.lock().unwrap().drain(..) {
         println!("Compressing {}...", f.display());
         compress_lz5_file(&f)?;
     }
     Ok(())
 }
 
-fn write_file_if_not_matching(path: &Path, data: &[u8]) -> Result<bool> {
+fn write_file_if_not_matching(path: &Path, data: &[u8]) -> Result<bool, io::Error> {
     let update_needed = if let Ok(existing_data) = fs::read(path) {
         let mut hasher = DefaultHasher::new();
         existing_data.hash(&mut hasher);
