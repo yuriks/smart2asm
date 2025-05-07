@@ -2,10 +2,39 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
+use std::marker::PhantomData;
+use std::num::TryFromIntError;
 use std::str::FromStr;
 use std::sync::Arc;
 use minijinja::{value, Error, State, Value};
 use minijinja::value::{Object, ObjectRepr};
+use serde::de::Visitor;
+
+struct HexDeserializeVisitor<T>(PhantomData<fn() -> T>);
+
+impl<'de, T: FromStr + TryFrom<u64>> Visitor<'de> for HexDeserializeVisitor<T>
+where
+    <T as FromStr>::Err: Display,
+    <T as TryFrom<u64>>::Error: Display,
+{
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
+        formatter.write_str("a hex value")
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error
+    {
+        T::try_from(v).map_err(serde::de::Error::custom)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E>
+    {
+        FromStr::from_str(v).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -41,6 +70,14 @@ impl From<u8> for HexU8 {
     }
 }
 
+impl TryFrom<u64> for HexU8 {
+    type Error = TryFromIntError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        u8::try_from(value).map(HexU8)
+    }
+}
+
 impl From<HexU8> for u8 {
     fn from(val: HexU8) -> u8 {
         val.0
@@ -70,12 +107,9 @@ impl<'de> Deserialize<'de> for HexU8 {
     where
         D: Deserializer<'de>,
     {
-        let s: Cow<str> = Deserialize::deserialize(deserializer)?;
-        FromStr::from_str(&s).map_err(serde::de::Error::custom)
+        deserializer.deserialize_str(HexDeserializeVisitor::<HexU8>(PhantomData))
     }
 }
-
-impl Object for HexU8 {}
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -111,6 +145,14 @@ impl From<u16> for HexU16 {
     }
 }
 
+impl TryFrom<u64> for HexU16 {
+    type Error = TryFromIntError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        u16::try_from(value).map(HexU16)
+    }
+}
+
 impl From<HexU16> for u16 {
     fn from(val: HexU16) -> u16 {
         val.0
@@ -140,12 +182,9 @@ impl<'de> Deserialize<'de> for HexU16 {
     where
         D: Deserializer<'de>,
     {
-        let s: Cow<str> = Deserialize::deserialize(deserializer)?;
-        FromStr::from_str(&s).map_err(serde::de::Error::custom)
+        deserializer.deserialize_str(HexDeserializeVisitor::<HexU16>(PhantomData))
     }
 }
-
-impl Object for HexU16 {}
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -181,6 +220,14 @@ impl From<u32> for HexU24 {
     }
 }
 
+impl TryFrom<u64> for HexU24 {
+    type Error = TryFromIntError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        u32::try_from(value).map(HexU24)
+    }
+}
+
 impl From<HexU24> for u32 {
     fn from(val: HexU24) -> u32 {
         val.0
@@ -210,12 +257,9 @@ impl<'de> Deserialize<'de> for HexU24 {
     where
         D: Deserializer<'de>,
     {
-        let s: Cow<str> = Deserialize::deserialize(deserializer)?;
-        FromStr::from_str(&s).map_err(serde::de::Error::custom)
+        deserializer.deserialize_str(HexDeserializeVisitor::<HexU24>(PhantomData))
     }
 }
-
-impl Object for HexU24 {}
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub enum HexValue {

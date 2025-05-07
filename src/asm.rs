@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::sync::Arc;
 use minijinja::{value, Error, State, Value};
 use minijinja::value::{Object, ViaDeserialize};
+use serde::Serialize;
 
 pub enum LookupResult<'a, T> {
     Label(&'a str),
@@ -21,11 +22,11 @@ impl<T: Display> Display for LookupResult<'_, T> {
     }
 }
 
-impl<T: Object + 'static> From<LookupResult<'_, T>> for Value {
+impl<T: Serialize + 'static> From<LookupResult<'_, T>> for Value {
     fn from(value: LookupResult<T>) -> Value {
         match value {
             LookupResult::Label(l) => l.into(),
-            LookupResult::NotFound(a) => Value::from_object(a),
+            LookupResult::NotFound(a) => Value::from_serialize(a),
         }
     }
 }
