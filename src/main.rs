@@ -31,17 +31,21 @@ struct DeduperEntry<T> {
     refcount: u32,
 }
 
-struct OwningRef<T>(usize, String, PhantomData<fn(T) -> T>);
+struct OwningRef<T> {
+    idx: usize,
+    label: String,
+    marker: PhantomData<fn(T) -> T>,
+}
 
 impl<T> OwningRef<T> {
     fn label(&self) -> &str {
-        &self.1
+        &self.label
     }
 }
 
 impl<T> Hash for OwningRef<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
+        self.idx.hash(state);
     }
 }
 
@@ -80,11 +84,15 @@ impl<T: Hash> DataDeduper<T> {
         let entry = &mut self.entries[id];
         entry.labels.push(label.clone());
         entry.refcount += 1;
-        OwningRef(id, label, PhantomData)
+        OwningRef {
+            idx: id,
+            label,
+            marker: PhantomData,
+        }
     }
 
     fn _get(&self, id: OwningRef<T>) -> Option<&DeduperEntry<T>> {
-        self.entries.get(id.0)
+        self.entries.get(id.idx)
     }
 }
 
