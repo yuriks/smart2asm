@@ -5,12 +5,12 @@ use anyhow::{Result, anyhow};
 use glob::glob;
 use itertools::Itertools;
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr};
-use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context};
+use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufReader, BufWriter, Write};
@@ -31,10 +31,21 @@ struct DeduperEntry<T> {
     refcount: u32,
 }
 
+#[derive(derive_more::Debug)]
 struct OwningRef<T> {
     idx: usize,
     label: String,
     marker: PhantomData<fn(T) -> T>,
+}
+
+impl<T> Clone for OwningRef<T> {
+    fn clone(&self) -> Self {
+        Self {
+            idx: self.idx,
+            label: self.label.clone(),
+            marker: PhantomData,
+        }
+    }
 }
 
 impl<T> OwningRef<T> {
@@ -46,6 +57,53 @@ impl<T> OwningRef<T> {
 impl<T> Hash for OwningRef<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.idx.hash(state);
+    }
+}
+
+impl<T: RomDataHandle + 'static> Serialize for OwningRef<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Value::from_object(self.clone()).serialize(serializer)
+    }
+}
+
+trait RomDataHandle
+where
+    Self: Sized,
+{
+    fn data_field_name() -> &'static str;
+
+    #[allow(dead_code)]
+    fn data_deduper_for(data: &RomData) -> &DataDeduper<Self>;
+}
+
+impl<T: RomDataHandle> Object for OwningRef<T> {
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        match key.as_str()? {
+            "label" => Some(Value::from(self.label())),
+            _ => None,
+        }
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        Enumerator::Str(&["label"])
+    }
+
+    fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
+        let () = value::from_args(args)?;
+        state
+            .lookup("data")
+            .ok_or_else(|| minijinja::Error::new(ErrorKind::UndefinedError, "`data` is undefined"))?
+            .get_attr(T::data_field_name())
+    }
+
+    fn render(self: &Arc<Self>, f: &mut Formatter) -> std::fmt::Result
+    where
+        Self: Sized + 'static,
+    {
+        f.write_str(self.label())
     }
 }
 
@@ -831,7 +889,7 @@ impl ScrollDataKind {
 
 type PlmPopulation = Vec<PlmPopulationEntry>;
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 struct PlmPopulationEntry {
     plm_header: HexU16, // label
     pos_x: HexU8,
@@ -839,7 +897,7 @@ struct PlmPopulationEntry {
     param: PlmParam,
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 enum PlmParam {
     Value(HexU16),
     ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
@@ -879,21 +937,6 @@ impl PlmPopulationEntry {
                 })
             })
             .collect::<Result<_>>()
-    }
-
-    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
-        write!(
-            w,
-            "    %PLMPopEntry({}, {}, {}, ",
-            symbols.resolve_label(0x84, self.plm_header),
-            self.pos_x,
-            self.pos_y
-        )?;
-        match &self.param {
-            PlmParam::Value(val) => writeln!(w, "{})", val)?,
-            PlmParam::ScrollDataUpdate(ref_) => writeln!(w, "{})", ref_.label())?,
-        }
-        Ok(())
     }
 }
 
@@ -1136,7 +1179,6 @@ struct RomData {
     enemy_populations: DataDeduper<EnemyPopulation>,
     enemy_gfx_sets: DataDeduper<EnemyGfxSet>,
     room_scroll_data: DataDeduper<ScrollData>,
-    #[serde(skip)]
     plm_populations: DataDeduper<PlmPopulation>,
     plm_param_scrolldata: DataDeduper<Vec<ScrollDataChange>>,
     #[serde(skip)]
@@ -1146,6 +1188,22 @@ struct RomData {
     doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
     doorcode_raw: DataDeduper<Vec<CodeInstruction>>,
 }
+
+macro_rules! impl_rom_data_handle {
+    ($field:ident: $type:ty) => {
+        impl RomDataHandle for $type {
+            fn data_field_name() -> &'static str {
+                stringify!($field)
+            }
+
+            fn data_deduper_for(data: &RomData) -> &DataDeduper<Self> {
+                &data.$field
+            }
+        }
+    };
+}
+
+impl_rom_data_handle!(plm_param_scrolldata: Vec<ScrollDataChange>);
 
 fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
     println!("Parsing {}...", path.display());
@@ -1360,17 +1418,9 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
         template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("plm_populations.asm.j2")?;
         let mut f = File::create(out_dir.join("plm_populations.asm"))?;
-        rom_data.plm_populations.emit_asm_for_entries(
-            &mut BufWriter::new(&mut f),
-            |w, entry| {
-                for plm_entry in entry {
-                    plm_entry.emit_asm(w, symbols)?;
-                }
-                writeln!(w, "    dw $0000")?;
-                Ok(())
-            },
-        )?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let template = env.get_template("plm_param_scrolldata.asm.j2")?;
