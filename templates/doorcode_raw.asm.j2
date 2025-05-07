@@ -1,0 +1,11 @@
+; Raw Embedded Doorcode
+{% for labels, doorcode in data.doorcode_raw %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% for instr in doorcode %}
+    db {{ instr.op }}
+    {%- if instr.arg is not none %} : {{ instr.arg | data_directive }} {{ instr.arg }}{% endif +%}
+{% endfor %}
+{% endfor %}

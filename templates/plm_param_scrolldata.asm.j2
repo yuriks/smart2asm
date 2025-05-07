@@ -1,0 +1,11 @@
+; PLM Param Scroll Data
+{% for labels, scroll_data in data.plm_param_scrolldata %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% for change in scroll_data %}
+    db {{ change.screen_index }},{{ change.value }}
+{% endfor %}
+    db $80
+{% endfor %}

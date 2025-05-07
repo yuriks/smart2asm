@@ -3,7 +3,9 @@ use std::borrow::Cow;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
-use minijinja::value::Object;
+use std::sync::Arc;
+use minijinja::{value, Error, State, Value};
+use minijinja::value::{Object, ObjectRepr};
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
@@ -189,7 +191,17 @@ impl FromStr for HexU24 {
     type Err = std::num::ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        u32::from_str_radix(s, 16).map(HexU24)
+        let trimmed = s.strip_prefix('$').unwrap_or(s);
+        u32::from_str_radix(trimmed, 16).map(HexU24)
+    }
+}
+
+impl Serialize for HexU24 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+        serializer.collect_str(self)
     }
 }
 
@@ -280,12 +292,22 @@ impl FromStr for HexValue {
     type Err = std::num::ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let val = u32::from_str_radix(s, 16)?;
+        let trimmed = s.strip_prefix('$').unwrap_or(s);
+        let val = u32::from_str_radix(trimmed, 16)?;
         Ok(match s.chars().count() {
             ..=2 => HexValue::Byte(HexU8(val as u8)),
             ..=4 => HexValue::Word(HexU16(val as u16)),
             _ => HexValue::Long(HexU24(val as u32)),
         })
+    }
+}
+
+impl Serialize for HexValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+        Value::from_object(*self).serialize(serializer)
     }
 }
 
@@ -296,5 +318,21 @@ impl<'de> Deserialize<'de> for HexValue {
     {
         let s: Cow<str> = Deserialize::deserialize(deserializer)?;
         FromStr::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Object for HexValue {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Plain
+    }
+
+    fn call_method(self: &Arc<Self>, _state: &State<'_, '_>, method: &str, args: &[Value]) -> Result<Value, Error> {
+        match method {
+            "data_directive" => {
+                let () = value::from_args(args)?;
+                Ok(Value::from(self.data_directive()))
+            }
+            _ => Err(Error::from(minijinja::ErrorKind::UnknownMethod)),
+        }
     }
 }

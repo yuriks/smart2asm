@@ -374,7 +374,7 @@ impl ExitType {
     }
 }
 
-#[derive(Hash, Copy, Clone)]
+#[derive(Hash, Copy, Clone, Serialize)]
 struct ScrollDataChange {
     value: HexU8,
     screen_index: HexU8,
@@ -421,7 +421,7 @@ enum DoorAsmType {
     DoorCode(OwningRef<Vec<CodeInstruction>>),
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 struct CodeInstruction {
     op: HexU8,
     arg: Option<HexValue>,
@@ -798,7 +798,7 @@ impl EnemyPopulation {
 
 type EnemyGfxSet = Vec<EnemyGfxSetEntry>;
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 struct EnemyGfxSetEntry {
     enemy_header: HexU16, // label
     palette_index_and_flags: HexU16,
@@ -812,16 +812,6 @@ impl EnemyGfxSetEntry {
                 palette_index_and_flags: e.palette,
             })
             .collect()
-    }
-
-    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
-        writeln!(
-            w,
-            "    dw {},{}",
-            symbols.resolve_label(0xA0, self.enemy_header),
-            self.palette_index_and_flags
-        )?;
-        Ok(())
     }
 }
 
@@ -1157,13 +1147,10 @@ struct RomData {
     #[serde(skip)]
     fx_headers: DataDeduper<FxHeader>,
     enemy_populations: DataDeduper<EnemyPopulation>,
-    #[serde(skip)]
     enemy_gfx_sets: DataDeduper<EnemyGfxSet>,
-    #[serde(skip)]
     room_scroll_data: DataDeduper<ScrollData>,
     #[serde(skip)]
     plm_populations: DataDeduper<PlmPopulation>,
-    #[serde(skip)]
     plm_param_scrolldata: DataDeduper<Vec<ScrollDataChange>>,
     #[serde(skip)]
     bgdata_commands: DataDeduper<BgDataCommandList>,
@@ -1172,7 +1159,6 @@ struct RomData {
 
     #[serde(skip)]
     doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
-    #[serde(skip)]
     doorcode_raw: DataDeduper<Vec<CodeInstruction>>,
 }
 
@@ -1189,6 +1175,7 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
     env.set_loader(minijinja::path_loader("templates"));
     env.set_trim_blocks(true);
     env.set_undefined_behavior(UndefinedBehavior::Strict);
+    env.add_filter("data_directive", HexValue::data_directive);
     env.add_global("symbols", Value::from_dyn_object(symbols_arc.clone()));
 
     {
@@ -1310,32 +1297,14 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
         template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("enemy_gfx_sets.asm.j2")?;
         let mut f = File::create(out_dir.join("enemy_gfx_sets.asm"))?;
-        rom_data
-            .enemy_gfx_sets
-            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
-                for gfx_entry in entry {
-                    gfx_entry.emit_asm(w, symbols)?;
-                }
-                writeln!(w, "    dw $FFFF")?;
-                Ok(())
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("room_scroll_data.asm.j2")?;
         let mut f = File::create(out_dir.join("room_scroll_data.asm"))?;
-        rom_data.room_scroll_data.emit_asm_for_entries(
-            &mut BufWriter::new(&mut f),
-            |w, entry| {
-                for line in entry.chunks(16) {
-                    write!(w, "    db {}", line[0])?;
-                    for x in &line[1..] {
-                        write!(w, ",{}", x)?;
-                    }
-                    writeln!(w)?;
-                }
-                Ok(())
-            },
-        )?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let mut f = File::create(out_dir.join("plm_populations.asm"))?;
@@ -1351,17 +1320,9 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
         )?;
     }
     {
+        let template = env.get_template("plm_param_scrolldata.asm.j2")?;
         let mut f = File::create(out_dir.join("plm_param_scrolldata.asm"))?;
-        rom_data.plm_param_scrolldata.emit_asm_for_entries(
-            &mut BufWriter::new(&mut f),
-            |w, entry| {
-                for change in entry {
-                    writeln!(w, "    db {},{}", change.screen_index, change.value)?;
-                }
-                writeln!(w, "    db $80")?;
-                Ok(())
-            },
-        )?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let mut f = File::create(out_dir.join("bgdata_commands.asm"))?;
@@ -1385,21 +1346,10 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
             })?;
     }
     {
+        let template = env.get_template("doorcode_raw.asm.j2")?;
         let mut f = File::create(out_dir.join("doorcode_raw.asm"))?;
-        rom_data
-            .doorcode_raw
-            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
-                for instruction in entry {
-                    write!(w, "    db {}", instruction.op)?;
-                    if let Some(arg) = instruction.arg {
-                        write!(w, " : {} {}", arg.data_directive(), arg)?;
-                    }
-                    writeln!(w)?;
-                }
-                Ok(())
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
-
     println!("Writing and compressing binary data...");
     let mut compression_queue = Vec::new();
 

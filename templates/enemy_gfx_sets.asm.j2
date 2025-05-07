@@ -1,0 +1,11 @@
+; Enemy GFX Sets
+{% for labels, gfx_set in data.enemy_gfx_sets %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% for e in gfx_set %}
+    dw {{ symbols.resolve_label(0xA0, e.enemy_header) }},{{ e.palette_index_and_flags }}
+{% endfor %}
+    dw $FFFF
+{% endfor %}
