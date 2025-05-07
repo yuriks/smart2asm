@@ -1,0 +1,17 @@
+; Scroll Update Doorcode
+{% for labels, doorcode in data.doorcode_scroll_updates %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+    php
+    sep #$20
+{% for change in doorcode | sort(attribute="value") %}
+{% if loop.changed(change.value) %}
+    lda.b #{{ change.value }}
+{% endif %}
+    sta {{ symbols.resolve_label_long(0x7ECD20) }}+{{ change.screen_index }}
+{% endfor %}
+    plp
+    rts
+{% endfor %}

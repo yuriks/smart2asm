@@ -390,30 +390,6 @@ impl From<&xml_types::ScrollDataChangeEntry> for ScrollDataChange {
     }
 }
 
-fn emit_doorcode_asm_for_scrolldata_change(
-    w: &mut Writer,
-    changes: &[ScrollDataChange],
-) -> Result<()> {
-    let mut changes = changes.to_vec();
-    changes.sort_by_key(|c| (c.value, c.screen_index));
-
-    let mut current_a = None;
-
-    writeln!(w, "    php")?;
-    writeln!(w, "    sep #$20")?;
-    for change in changes {
-        if current_a != Some(change.value) {
-            writeln!(w, "    lda.b #{}", change.value)?;
-            current_a = Some(change.value);
-        }
-        let target_addr = HexU24(0x7ECD20 + change.screen_index.0 as u32);
-        writeln!(w, "    sta {target_addr}")?;
-    }
-    writeln!(w, "    plp")?;
-    writeln!(w, "    rts")?;
-    Ok(())
-}
-
 #[derive(Hash)]
 enum DoorAsmType {
     Address(HexU16), // label
@@ -1157,7 +1133,6 @@ struct RomData {
     #[serde(skip)]
     bgdata_tile_data: DataDeduper<(Vec<u8>, bool)>, // bool true if data is compressed
 
-    #[serde(skip)]
     doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
     doorcode_raw: DataDeduper<Vec<CodeInstruction>>,
 }
@@ -1338,12 +1313,9 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
         )?;
     }
     {
+        let template = env.get_template("doorcode_scroll_updates.asm.j2")?;
         let mut f = File::create(out_dir.join("doorcode_scroll_updates.asm"))?;
-        rom_data
-            .doorcode_scroll_updates
-            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
-                emit_doorcode_asm_for_scrolldata_change(w, entry)
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let template = env.get_template("doorcode_raw.asm.j2")?;
