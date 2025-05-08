@@ -1,0 +1,31 @@
+{% set command_types = {
+    "CopyToVram":              "$0002",
+    "Decompress":              "$0004",
+    "ClearBg3":                "$0006",
+    "CopyToVramBg3":           "$0008",
+    "ClearBg2":                "$000A",
+    "ClearBg2_2":              "$000C",
+    "DoorDependentCopyToVram": "$000E",
+} %}
+{% macro command_params(cmd) %}
+    {% if cmd.from_door is defined %} : dw {{ cmd.from_door }}{% endif %}
+    {% if cmd.source is defined %}
+        {% if cmd.source.Label is defined %} : dl {{ symbols.resolve_label_long(cmd.source.Label) }}
+        {%- else %} : dl {{ cmd.source.Ref }}
+        {%- endif %}
+    {% endif %}
+    {% if cmd.dest is defined %} : dw {{ cmd.dest }}
+        {%- if cmd.size is defined %},{{ cmd.size }}{% endif %}
+    {% endif %}
+{% endmacro %}
+; BGData Setup Commands
+{% for labels, commands in data.bgdata_commands %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% for cmd in commands %}
+    dw {{ command_types[cmd.type] }}{{ command_params(cmd) }}
+{% endfor %}
+    dw $0000
+{% endfor %}

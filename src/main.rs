@@ -942,7 +942,8 @@ impl PlmPopulationEntry {
 
 type BgDataCommandList = Vec<BgDataCommand>;
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
+#[serde(tag = "type")]
 enum BgDataCommand {
     CopyToVram(CopyCommandParams), // Command $2
     Decompress {
@@ -958,18 +959,19 @@ enum BgDataCommand {
         // Command $E
         // SMART doesn't really support this command, it doesn't try to repoint this value
         from_door: HexU16,
+        #[serde(flatten)]
         copy_params: CopyCommandParams,
     },
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 struct CopyCommandParams {
     source: BgDataSource,
     dest: HexU16, // VRAM address
     size: HexU16,
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize)]
 enum BgDataSource {
     Label(HexU24),
     Ref(OwningRef<(Vec<u8>, bool)>),
@@ -1086,47 +1088,6 @@ impl BgDataCommand {
         }
         Ok(entries)
     }
-
-    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
-        let emit_source = |w: &mut Writer, source: &BgDataSource| match source {
-            BgDataSource::Label(addr) => {
-                write!(w, " : dl {}", symbols.resolve_label_long(*addr))
-            }
-            BgDataSource::Ref(ref_) => write!(w, " : dl {}", ref_.label()),
-        };
-        let emit_copy_params = |w: &mut Writer, params: &CopyCommandParams| {
-            emit_source(w, &params.source)?;
-            writeln!(w, " : dw {},{}", params.dest, params.size)
-        };
-
-        match self {
-            BgDataCommand::CopyToVram(copy_params) => {
-                write!(w, "    dw $0002")?;
-                emit_copy_params(w, copy_params)?;
-            }
-            BgDataCommand::Decompress { source, dest } => {
-                write!(w, "    dw $0004")?;
-                emit_source(w, source)?;
-                writeln!(w, " : dw {dest}")?;
-            }
-            BgDataCommand::_ClearBg3 => writeln!(w, "    dw $0006")?,
-            BgDataCommand::CopyToVramBg3(copy_params) => {
-                write!(w, "    dw $0008")?;
-                emit_copy_params(w, copy_params)?;
-            }
-            BgDataCommand::ClearBg2 => writeln!(w, "    dw $000A")?,
-            BgDataCommand::ClearBg2_2 => writeln!(w, "    dw $000C")?,
-            BgDataCommand::DoorDependentCopyToVram {
-                from_door,
-                copy_params,
-            } => {
-                // sadly, broken pointer :(
-                write!(w, "    dw $000E : dw {from_door}")?;
-                emit_copy_params(w, copy_params)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 struct LoadStation {
@@ -1181,7 +1142,6 @@ struct RomData {
     room_scroll_data: DataDeduper<ScrollData>,
     plm_populations: DataDeduper<PlmPopulation>,
     plm_param_scrolldata: DataDeduper<Vec<ScrollDataChange>>,
-    #[serde(skip)]
     bgdata_commands: DataDeduper<BgDataCommandList>,
     bgdata_tile_data: DataDeduper<(Vec<u8>, bool)>, // bool true if data is compressed
 
@@ -1204,6 +1164,7 @@ macro_rules! impl_rom_data_handle {
 }
 
 impl_rom_data_handle!(plm_param_scrolldata: Vec<ScrollDataChange>);
+impl_rom_data_handle!(bgdata_tile_data: (Vec<u8>, bool));
 
 fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
     println!("Parsing {}...", path.display());
@@ -1428,17 +1389,9 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
         template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("bgdata_commands.asm.j2")?;
         let mut f = File::create(out_dir.join("bgdata_commands.asm"))?;
-        rom_data.bgdata_commands.emit_asm_for_entries(
-            &mut BufWriter::new(&mut f),
-            |w, entry| {
-                for command in entry {
-                    command.emit_asm(w, symbols)?;
-                }
-                writeln!(w, "    dw $0000")?;
-                Ok(())
-            },
-        )?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let template = env.get_template("doorcode_scroll_updates.asm.j2")?;
