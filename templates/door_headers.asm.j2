@@ -7,7 +7,7 @@
 {% if d.type == "Elevator" %}
     dw $0000
 {% else %}
-    dw RoomHeader_{{ data.rooms[d.destination].name }}
+    dw RoomHeader_{{ d.destination().name }}
     db {{ d.transition_flags }},{{ d.transition_type }},{{ d.doorcap_tile_x }},{{ d.doorcap_tile_y }},{{ d.destination_screen_x }},{{ d.destination_screen_y }}
     dw {{ d.samus_slide_speed }}
     {% if d.door_asm.Address is defined %}

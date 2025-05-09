@@ -6,7 +6,7 @@ use glob::glob;
 use itertools::Itertools;
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
-use serde::ser::SerializeSeq;
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -76,7 +76,13 @@ where
     where
         S: Serializer,
     {
-        Value::from_object(self.clone()).serialize(serializer)
+        if value::serializing_for_value() {
+            return Value::from_object(self.clone()).serialize(serializer);
+        }
+        let mut s = serializer.serialize_struct("OwningRef", 2)?;
+        s.serialize_field("idx", &self.idx)?;
+        s.serialize_field("label", &self.label)?;
+        s.end()
     }
 }
 
@@ -208,7 +214,70 @@ impl<T: Serialize> Serialize for DataDeduper<T> {
 
 type Writer<'a> = BufWriter<&'a mut dyn Write>;
 
-type RoomId = (u8 /* area index */, u8 /* room index */);
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+struct RoomId {
+    area: u8,
+    room: u8,
+}
+
+impl Debug for RoomId {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        f.debug_struct("RoomId")
+            .field("area", &HexU8(self.area))
+            .field("room", &HexU8(self.room))
+            .finish()
+    }
+}
+
+impl RomDataHandle for RoomId {
+    type Target = RoomHeader;
+
+    fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target> {
+        data.rooms.get(self)
+    }
+}
+
+impl Serialize for RoomId
+where
+    Self: Object + 'static,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value::serializing_for_value() {
+            return Value::from_object(self.clone()).serialize(serializer);
+        }
+        let mut s = serializer.serialize_struct("RoomId", 2)?;
+        s.serialize_field("area", &self.area)?;
+        s.serialize_field("room", &self.room)?;
+        s.end()
+    }
+}
+
+impl Object for RoomId
+{
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        match key.as_str()? {
+            "area" => Some(Value::from(self.area)),
+            "room" => Some(Value::from(self.room)),
+            _ => None,
+        }
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        Enumerator::Str(&["area", "room"])
+    }
+
+    fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
+        let () = value::from_args(args)?;
+        let internal_state = get_internal_state(state)?;
+        let object = self
+            .resolve(&*internal_state.rom_data)
+            .ok_or(ErrorKind::UndefinedError)?;
+        Ok(Value::from_serialize(object))
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct RoomHeader {
@@ -238,7 +307,10 @@ impl RoomHeader {
         xml_room: &xml_types::Room,
         room_name: String,
     ) -> Result<(RoomId, RoomHeader)> {
-        let room_id = (xml_room.area.0, xml_room.index.0);
+        let room_id = RoomId {
+            area: xml_room.area.0,
+            room: xml_room.index.0,
+        };
         let exits = xml_room
             .doors
             .iter()
@@ -314,7 +386,10 @@ impl ExitType {
         Ok(match xml {
             xml_types::DoorEntry::Elevator => ExitType::Elevator,
             xml_types::DoorEntry::Door(d) => ExitType::Door(DoorHeader {
-                destination: (d.toroom.area.into(), d.toroom.index.into()),
+                destination: RoomId {
+                    area: d.toroom.area.into(),
+                    room: d.toroom.index.into(),
+                },
                 transition_flags: d.bitflag,
                 transition_type: d.direction,
                 doorcap_tile_x: HexU8(d.screenx.0 * 0x10 + d.tilex.0),
@@ -612,9 +687,13 @@ impl FxHeaderEntry {
             .map(|(i, fx)| {
                 let from_door = match (fx.default, fx.roomarea, fx.roomindex, fx.fromdoor) {
                     (true, None, None, None) => None,
-                    (false, Some(area), Some(index), Some(door)) => {
-                        Some(((area.0, index.0), door.0))
-                    }
+                    (false, Some(area), Some(index), Some(door)) => Some((
+                        RoomId {
+                            area: area.0,
+                            room: index.0,
+                        },
+                        door.0,
+                    )),
                     _ => {
                         return Err(anyhow!(
                             "Fx1 `default` and door reference are mutually exclusive"
@@ -656,11 +735,7 @@ impl FxHeaderEntry {
         write!(w, "    dw ")?;
         if let Some(door_id) = self.from_door {
             let Some(target_room) = rooms.get(&door_id.0) else {
-                return Err(anyhow!(
-                    "FX from_door room ({:02X},${:02X}) not found",
-                    door_id.0.0,
-                    door_id.0.1,
-                ));
+                return Err(anyhow!("FX from_door room {:?} not found", door_id.0));
             };
             writeln!(w, "Door_{}_{}", target_room.name, door_id.1)?;
         } else {
@@ -994,7 +1069,10 @@ impl LoadStation {
         room_id: RoomId,
     ) -> Result<(HexU8, LoadStation)> {
         let from_door = (
-            (xml.indoor.room_area.0, xml.indoor.room_index.0),
+            RoomId {
+                area: xml.indoor.room_area.0,
+                room: xml.indoor.room_index.0,
+            },
             xml.indoor.door_index.0,
         );
         Ok((
@@ -1197,18 +1275,16 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &P
                 }
                 let Some(target_room) = rom_data.rooms.get(&station.room) else {
                     return Err(anyhow!(
-                        "Load station {} destination room (${:02X},${:02X}) not found",
+                        "Load station {} destination room {:?} not found",
                         station_id,
-                        station.room.0,
-                        station.room.1,
+                        station.room,
                     ));
                 };
                 let Some(from_door_room) = rom_data.rooms.get(&station.from_door.0) else {
                     return Err(anyhow!(
-                        "Load station {} from_door room (${:02X},${:02X}) not found",
+                        "Load station {} from_door room {:?} not found",
                         station_id,
-                        station.from_door.0.0,
-                        station.from_door.0.1,
+                        station.from_door.0,
                     ));
                 };
                 let Some(from_door_ref) = from_door_room.exits.get(station.from_door.1 as usize)
