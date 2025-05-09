@@ -1,0 +1,37 @@
+; Room Headers
+{% for _, r in data.rooms | items %}
+
+RoomHeader_{{ r.name }}:
+    db {{ r.room_index }},{{ r.area_index }},{{ r.room_map_x }},{{ r.room_map_y }},{{ r.room_width }},{{ r.room_height }},{{ r.up_scroll }},{{ r.down_scroll }},{{ r.special_gfx_flags }}
+    dw RoomDoors_{{ r.name }}
+{% for s_idx in range(r.states | length) | reverse %}
+    {% set s = r.states[s_idx] %}
+    dw {{ symbols.resolve_label(0x8F, s.condition_test) }}
+    {%- for arg in s.condition_test_args %} : db {{ arg }}{% endfor +%}
+    {% if s_idx != 0 %}
+    dw RoomState_{{ r.name }}_{{ s_idx }}
+    {% endif %}
+{% endfor %}
+{% for s in r.states %}
+
+RoomState_{{ r.name }}_{{ loop.index0 }}:
+    dl {{ s.level_data }}
+    db {{ s.gfx_set }},{{ s.music_set }},{{ s.music_track }}
+    dw {{ s.fx_header or "$0000" }}
+    dw {{ s.enemy_population }}
+    dw {{ s.enemy_gfx_set }}
+    {% set no_layer2_bit = "" if s.layer2_exists else "|1" %}
+    db {{ s.layer2_scroll_x }}{{ no_layer2_bit }},{{ s.layer2_scroll_y }}{{ no_layer2_bit }}
+    dw {{ s.scroll_data.Fixed | default(s.scroll_data.Ref) }}
+    dw {{ s.unused_roomvar }}
+    dw {{ symbols.resolve_label(0x8F, s.main_asm) }}
+    dw {{ s.plm_population }}
+    dw {{ s.bgdata_commands or "$0000" }}
+    dw {{ symbols.resolve_label(0x8F, s.setup_asm) }}
+{% endfor %}
+
+RoomDoors_{{ r.name }}:
+{% for e in r.exits %}
+    dw {{ e }}
+{% endfor %}
+{% endfor %}

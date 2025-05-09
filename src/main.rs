@@ -210,7 +210,7 @@ type Writer<'a> = BufWriter<&'a mut dyn Write>;
 
 type RoomId = (u8 /* area index */, u8 /* room index */);
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct RoomHeader {
     name: String,
 
@@ -281,94 +281,17 @@ impl RoomHeader {
             },
         ))
     }
-
-    fn emit_asm(&self, w: &mut Writer, symbols: &SymbolMap) -> Result<()> {
-        let room_name = &self.name;
-
-        writeln!(
-            w,
-            "    db {},{},{},{},{},{},{},{},{}",
-            self.room_index,
-            self.area_index,
-            self.room_map_x,
-            self.room_map_y,
-            self.room_width,
-            self.room_height,
-            self.up_scroll,
-            self.down_scroll,
-            self.special_gfx_flags
-        )?;
-        writeln!(w, "    dw RoomDoors_{room_name}")?;
-
-        for (i, state) in self.states.iter().enumerate().rev() {
-            write!(
-                w,
-                "    dw {}",
-                symbols.resolve_label(0x8F, state.condition_test)
-            )?;
-            for arg in &state.condition_test_args {
-                write!(w, " : db {arg}")?;
-            }
-            writeln!(w)?;
-
-            if i != 0 {
-                writeln!(w, "    dw RoomState_{room_name}_{i}")?;
-            }
-        }
-
-        for (i, state) in self.states.iter().enumerate() {
-            writeln!(w, "\nRoomState_{room_name}_{i}:")?;
-            writeln!(w, "    dl {}", state.level_data.label())?;
-            writeln!(
-                w,
-                "    db {},{},{}",
-                state.gfx_set, state.music_set, state.music_track
-            )?;
-            match &state.fx_header {
-                None => writeln!(w, "    dw $0000")?,
-                Some(fx_header) => writeln!(w, "    dw {}", fx_header.label())?,
-            }
-            writeln!(w, "    dw {}", state.enemy_population.label())?;
-            writeln!(w, "    dw {}", state.enemy_gfx_set.label())?;
-            let no_layer2_bit = if state.layer2_exists { 0 } else { 1 };
-            writeln!(
-                w,
-                "    db {},{}",
-                HexU8(state.layer2_scroll_x.0 | no_layer2_bit),
-                HexU8(state.layer2_scroll_y.0 | no_layer2_bit)
-            )?;
-            match &state.scroll_data {
-                ScrollDataKind::Fixed(val) => writeln!(w, "    dw {}", val)?,
-                ScrollDataKind::Ref(scroll_data) => writeln!(w, "    dw {}", scroll_data.label())?,
-            }
-            writeln!(w, "    dw {}", state.unused_roomvar)?;
-            writeln!(w, "    dw {}", symbols.resolve_label(0x8F, state.main_asm))?;
-            writeln!(w, "    dw {}", state.plm_population.label())?;
-            match &state.bgdata_commands {
-                None => writeln!(w, "    dw $0000")?,
-                Some(bgdata_commands) => writeln!(w, "    dw {}", bgdata_commands.label())?,
-            }
-            writeln!(w, "    dw {}", symbols.resolve_label(0x8F, state.setup_asm))?;
-        }
-
-        writeln!(w, "\nRoomDoors_{room_name}:")?;
-        for exit in &self.exits {
-            writeln!(w, "    dw {}", exit.label())?;
-        }
-
-        Ok(())
-    }
 }
 
 type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
 
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, Serialize)]
 enum ExitType {
     Elevator,
     Door(DoorHeader),
 }
 
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, Serialize)]
 struct DoorHeader {
     destination: RoomId,
     transition_flags: HexU8, // 0x80 = elevator destination, 0x40 = area change
@@ -461,7 +384,7 @@ impl From<&xml_types::ScrollDataChangeEntry> for ScrollDataChange {
     }
 }
 
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, Serialize)]
 enum DoorAsmType {
     Address(HexU16), // label
     ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
@@ -519,7 +442,7 @@ impl DoorAsmType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct RoomState {
     // Not part of header
     condition_test: HexU16,          // label
@@ -702,7 +625,7 @@ impl RoomState {
 
 type FxHeader = Vec<FxHeaderEntry>;
 
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, Serialize)]
 struct FxHeaderEntry {
     from_door: Option<DoorId>,
     liquid_y_start: HexU16,
@@ -865,7 +788,7 @@ impl EnemyGfxSetEntry {
 
 type ScrollData = Vec<HexU8>;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 enum ScrollDataKind {
     /// Stores fixed scroll value minus one. (0 = $01, 1 = $02)
     Fixed(HexU16),
@@ -1131,7 +1054,6 @@ impl LoadStation {
 
 #[derive(Default, Debug, Serialize)]
 struct RomData {
-    #[serde(skip)]
     rooms: BTreeMap<RoomId, RoomHeader>,
     #[serde(skip)]
     doors: DataDeduper<ExitType>,
@@ -1165,8 +1087,20 @@ macro_rules! impl_rom_data_handle {
     };
 }
 
+// rooms: BTreeMap<RoomId, RoomHeader>
+impl_rom_data_handle!(doors: ExitType);
+// load_stations: BTreeMap<(HexU8, HexU8), LoadStation>
+impl_rom_data_handle!(compressed_level_data: Vec<u8>);
+impl_rom_data_handle!(fx_headers: FxHeader);
+impl_rom_data_handle!(enemy_populations: EnemyPopulation);
+impl_rom_data_handle!(enemy_gfx_sets: EnemyGfxSet);
+impl_rom_data_handle!(room_scroll_data: ScrollData);
+impl_rom_data_handle!(plm_populations: PlmPopulation);
 impl_rom_data_handle!(plm_param_scrolldata: Vec<ScrollDataChange>);
+impl_rom_data_handle!(bgdata_commands: BgDataCommandList);
 impl_rom_data_handle!(bgdata_tile_data: (Vec<u8>, bool));
+// doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>
+impl_rom_data_handle!(doorcode_raw: Vec<CodeInstruction>);
 
 fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
     println!("Parsing {}...", path.display());
@@ -1261,12 +1195,9 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &P
     env.add_filter("write_file", write_file_filter);
 
     {
+        let template = env.get_template("room_headers.asm.j2")?;
         let mut f = File::create(out_dir.join("room_headers.asm"))?;
-        let mut w: Writer = BufWriter::new(&mut f);
-        for (_room_id, room) in &rom_data.rooms {
-            writeln!(&mut w, "\nRoomHeader_{}:", &room.name)?;
-            room.emit_asm(&mut w, symbols)?;
-        }
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let mut f = File::create(out_dir.join("door_headers.asm"))?;
