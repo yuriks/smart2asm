@@ -176,27 +176,6 @@ impl<T> DataDeduper<T> {
     fn entries(&self) -> &[DeduperEntry<T>] {
         &self.entries
     }
-
-    fn emit_asm_for_entries<F>(&self, w: &mut Writer, mut f: F) -> Result<()>
-    where
-        F: FnMut(&mut Writer, &T) -> Result<()>,
-    {
-        self.emit_asm_for_entries_with_metadata(w, |w, e| f(w, &e.data))
-    }
-
-    fn emit_asm_for_entries_with_metadata<F>(&self, w: &mut Writer, mut f: F) -> Result<()>
-    where
-        F: FnMut(&mut Writer, &DeduperEntry<T>) -> Result<()>,
-    {
-        for e in self.entries() {
-            writeln!(w)?;
-            for l in &e.labels {
-                writeln!(w, "{l}:")?;
-            }
-            f(w, e)?;
-        }
-        Ok(())
-    }
 }
 
 impl<T: Serialize> Serialize for DataDeduper<T> {
@@ -204,8 +183,8 @@ impl<T: Serialize> Serialize for DataDeduper<T> {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(self.entries.len()))?;
-        for e in &self.entries {
+        let mut seq = serializer.serialize_seq(Some(self.entries().len()))?;
+        for e in self.entries() {
             seq.serialize_element(&(&e.labels, &e.data))?;
         }
         seq.end()
@@ -725,41 +704,6 @@ impl FxHeaderEntry {
             .collect::<Result<_>>()
             .map(Some)
     }
-
-    fn emit_asm(
-        &self,
-        w: &mut Writer,
-        _symbols: &SymbolMap,
-        rooms: &BTreeMap<RoomId, RoomHeader>,
-    ) -> Result<()> {
-        write!(w, "    dw ")?;
-        if let Some(door_id) = self.from_door {
-            let Some(target_room) = rooms.get(&door_id.0) else {
-                return Err(anyhow!("FX from_door room {:?} not found", door_id.0));
-            };
-            writeln!(w, "Door_{}_{}", target_room.name, door_id.1)?;
-        } else {
-            writeln!(w, "$0000")?;
-        }
-        writeln!(
-            w,
-            "    dw {},{},{}",
-            self.liquid_y_start, self.liquid_y_target, self.liquid_y_speed
-        )?;
-        writeln!(
-            w,
-            "    db {},{},{},{},{},{},{},{}",
-            self.liquid_timer,
-            self.fx_type,
-            self.layer_blend1,
-            self.layer_blend2,
-            self.liquid_flags,
-            self.enabled_palette_anims,
-            self.enabled_tile_anims,
-            self.palette_blend_index
-        )?;
-        Ok(())
-    }
 }
 
 #[derive(Debug, Hash, Serialize)]
@@ -1098,7 +1042,6 @@ struct RomData {
     load_stations: BTreeMap<(HexU8, HexU8), LoadStation>, // key: (area index, load station index)
 
     compressed_level_data: DataDeduper<Vec<u8>>,
-    #[serde(skip)]
     fx_headers: DataDeduper<FxHeader>,
     enemy_populations: DataDeduper<EnemyPopulation>,
     enemy_gfx_sets: DataDeduper<EnemyGfxSet>,
@@ -1208,8 +1151,7 @@ fn write_file_filter(
     }
 }
 
-fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
-    let symbols = symbols_arc.as_ref();
+fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
     let rom_data = rom_data_arc.as_ref();
 
     let internal_state = Arc::new(TemplateInternalState {
@@ -1227,7 +1169,7 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &P
         INTERNAL_STATE_KEY,
         Value::from_dyn_object(internal_state.clone()),
     );
-    env.add_global("symbols", Value::from_dyn_object(symbols_arc.clone()));
+    env.add_global("symbols", Value::from_dyn_object(symbols.clone()));
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
 
@@ -1317,21 +1259,9 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &P
         }
     }
     {
+        let template = env.get_template("fx_headers.asm.j2")?;
         let mut f = File::create(out_dir.join("fx_headers.asm"))?;
-        rom_data
-            .fx_headers
-            .emit_asm_for_entries(&mut BufWriter::new(&mut f), |w, entry| {
-                // Empty FX should just generate a $0000 pointer instead of empty entry
-                assert!(!entry.is_empty());
-                for fx_entry in entry {
-                    fx_entry.emit_asm(w, symbols, &rom_data.rooms)?;
-                }
-                if entry.last().unwrap().from_door.is_some() {
-                    // If last FX entry isn't unconditional, then emit a list terminator
-                    writeln!(w, "    dw $FFFF")?;
-                }
-                Ok(())
-            })?;
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let template = env.get_template("enemy_populations.asm.j2")?;

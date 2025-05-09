@@ -1,0 +1,20 @@
+; Room FX Headers
+{% for labels, fx_header in data.fx_headers %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% for fx in fx_header %}
+    {% if fx.from_door %}
+    dw Door_{{ fx.from_door[0]().name }}_{{ fx.from_door[1] }}
+    {% else %}
+    dw $0000
+    {% endif %}
+    dw {{ fx.liquid_y_start }},{{ fx.liquid_y_target }},{{ fx.liquid_y_speed }}
+    db {{ fx.liquid_timer }},{{ fx.fx_type }},{{ fx.layer_blend1 }},{{ fx.layer_blend2 }},{{ fx.liquid_flags }},{{ fx.enabled_palette_anims }},{{ fx.enabled_tile_anims }},{{ fx.palette_blend_index }}
+{% endfor %}
+{# If last FX entry isn't unconditional, then emit a list terminator #}
+{% if (fx_header | last).from_door %}
+    dw $FFFF
+{% endif %}
+{% endfor %}
