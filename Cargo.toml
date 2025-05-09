@@ -12,4 +12,3 @@ heck = "0.5"
 bytemuck = { version = "1.21", features = ["min_const_generics"] }
 itertools = "0.14"
 minijinja = { version = "2.10", features = ["loader"] }
-derive_more = { version = "2.0", features = ["debug"] }

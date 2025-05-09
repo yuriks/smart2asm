@@ -4,7 +4,7 @@ use crate::xml_types::{DataOrAddress, DecompSection};
 use anyhow::{Result, anyhow};
 use glob::glob;
 use itertools::Itertools;
-use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr};
+use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
@@ -31,7 +31,6 @@ struct DeduperEntry<T> {
     refcount: u32,
 }
 
-#[derive(derive_more::Debug)]
 struct OwningRef<T> {
     idx: usize,
     label: String,
@@ -48,6 +47,15 @@ impl<T> Clone for OwningRef<T> {
     }
 }
 
+impl<T> Debug for OwningRef<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OwningRef")
+            .field(&self.idx)
+            .field(&self.label)
+            .finish()
+    }
+}
+
 impl<T> OwningRef<T> {
     fn label(&self) -> &str {
         &self.label
@@ -60,7 +68,10 @@ impl<T> Hash for OwningRef<T> {
     }
 }
 
-impl<T: RomDataHandle + 'static> Serialize for OwningRef<T> {
+impl<T> Serialize for OwningRef<T>
+where
+    Self: Object + 'static,
+{
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -69,17 +80,17 @@ impl<T: RomDataHandle + 'static> Serialize for OwningRef<T> {
     }
 }
 
-trait RomDataHandle
-where
-    Self: Sized,
-{
-    fn data_field_name() -> &'static str;
+trait RomDataHandle {
+    type Target;
 
-    #[allow(dead_code)]
-    fn data_deduper_for(data: &RomData) -> &DataDeduper<Self>;
+    fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target>;
 }
 
-impl<T: RomDataHandle> Object for OwningRef<T> {
+impl<T> Object for OwningRef<T>
+where
+    Self: RomDataHandle,
+    <Self as RomDataHandle>::Target: Serialize,
+{
     fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
         match key.as_str()? {
             "label" => Some(Value::from(self.label())),
@@ -93,10 +104,11 @@ impl<T: RomDataHandle> Object for OwningRef<T> {
 
     fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
         let () = value::from_args(args)?;
-        state
-            .lookup("data")
-            .ok_or_else(|| minijinja::Error::new(ErrorKind::UndefinedError, "`data` is undefined"))?
-            .get_attr(T::data_field_name())
+        let internal_state = get_internal_state(state)?;
+        let object = self
+            .resolve(&*internal_state.rom_data)
+            .ok_or(ErrorKind::UndefinedError)?;
+        Ok(Value::from_serialize(object))
     }
 
     fn render(self: &Arc<Self>, f: &mut Formatter) -> std::fmt::Result
@@ -149,7 +161,7 @@ impl<T: Hash> DataDeduper<T> {
         }
     }
 
-    fn _get(&self, id: OwningRef<T>) -> Option<&DeduperEntry<T>> {
+    fn get(&self, id: &OwningRef<T>) -> Option<&DeduperEntry<T>> {
         self.entries.get(id.idx)
     }
 }
@@ -194,22 +206,11 @@ impl<T: Serialize> Serialize for DataDeduper<T> {
     }
 }
 
-impl<T: Debug + Sync + Send + Serialize + 'static> Object for DataDeduper<T> {
-    fn enumerate(self: &Arc<Self>) -> Enumerator {
-        self.mapped_enumerator(|this| {
-            Box::new(
-                this.entries
-                    .iter()
-                    .map(|e| Value::from_object(vec![Value::from_object(e.labels.clone())])),
-            )
-        })
-    }
-}
-
 type Writer<'a> = BufWriter<&'a mut dyn Write>;
 
 type RoomId = (u8 /* area index */, u8 /* room index */);
 
+#[derive(Debug)]
 struct RoomHeader {
     name: String,
 
@@ -361,13 +362,13 @@ impl RoomHeader {
 
 type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
 
-#[derive(Hash)]
+#[derive(Debug, Hash)]
 enum ExitType {
     Elevator,
     Door(DoorHeader),
 }
 
-#[derive(Hash)]
+#[derive(Debug, Hash)]
 struct DoorHeader {
     destination: RoomId,
     transition_flags: HexU8, // 0x80 = elevator destination, 0x40 = area change
@@ -444,7 +445,7 @@ impl ExitType {
     }
 }
 
-#[derive(Hash, Copy, Clone, Serialize)]
+#[derive(Debug, Hash, Copy, Clone, Serialize)]
 struct ScrollDataChange {
     value: HexU8,
     screen_index: HexU8,
@@ -460,14 +461,14 @@ impl From<&xml_types::ScrollDataChangeEntry> for ScrollDataChange {
     }
 }
 
-#[derive(Hash)]
+#[derive(Debug, Hash)]
 enum DoorAsmType {
     Address(HexU16), // label
     ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
     DoorCode(OwningRef<Vec<CodeInstruction>>),
 }
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 struct CodeInstruction {
     op: HexU8,
     arg: Option<HexValue>,
@@ -518,6 +519,7 @@ impl DoorAsmType {
     }
 }
 
+#[derive(Debug)]
 struct RoomState {
     // Not part of header
     condition_test: HexU16,          // label
@@ -700,7 +702,7 @@ impl RoomState {
 
 type FxHeader = Vec<FxHeaderEntry>;
 
-#[derive(Hash)]
+#[derive(Debug, Hash)]
 struct FxHeaderEntry {
     from_door: Option<DoorId>,
     liquid_y_start: HexU16,
@@ -802,13 +804,13 @@ impl FxHeaderEntry {
     }
 }
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 struct EnemyPopulation {
     entries: Vec<EnemyPopulationEntry>,
     kills_required: HexU8,
 }
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 struct EnemyPopulationEntry {
     enemy_header: HexU16, // label
     pos_x: HexU16,
@@ -844,7 +846,7 @@ impl EnemyPopulation {
 
 type EnemyGfxSet = Vec<EnemyGfxSetEntry>;
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 struct EnemyGfxSetEntry {
     enemy_header: HexU16, // label
     palette_index_and_flags: HexU16,
@@ -863,6 +865,7 @@ impl EnemyGfxSetEntry {
 
 type ScrollData = Vec<HexU8>;
 
+#[derive(Debug)]
 enum ScrollDataKind {
     /// Stores fixed scroll value minus one. (0 = $01, 1 = $02)
     Fixed(HexU16),
@@ -889,7 +892,7 @@ impl ScrollDataKind {
 
 type PlmPopulation = Vec<PlmPopulationEntry>;
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 struct PlmPopulationEntry {
     plm_header: HexU16, // label
     pos_x: HexU8,
@@ -897,7 +900,7 @@ struct PlmPopulationEntry {
     param: PlmParam,
 }
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 enum PlmParam {
     Value(HexU16),
     ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
@@ -942,7 +945,7 @@ impl PlmPopulationEntry {
 
 type BgDataCommandList = Vec<BgDataCommand>;
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 #[serde(tag = "type")]
 enum BgDataCommand {
     CopyToVram(CopyCommandParams), // Command $2
@@ -964,14 +967,14 @@ enum BgDataCommand {
     },
 }
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 struct CopyCommandParams {
     source: BgDataSource,
     dest: HexU16, // VRAM address
     size: HexU16,
 }
 
-#[derive(Hash, Serialize)]
+#[derive(Debug, Hash, Serialize)]
 enum BgDataSource {
     Label(HexU24),
     Ref(OwningRef<(Vec<u8>, bool)>),
@@ -1090,6 +1093,7 @@ impl BgDataCommand {
     }
 }
 
+#[derive(Debug)]
 struct LoadStation {
     room: RoomId,
     from_door: DoorId,
@@ -1125,7 +1129,7 @@ impl LoadStation {
     }
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Debug, Serialize)]
 struct RomData {
     #[serde(skip)]
     rooms: BTreeMap<RoomId, RoomHeader>,
@@ -1151,13 +1155,11 @@ struct RomData {
 
 macro_rules! impl_rom_data_handle {
     ($field:ident: $type:ty) => {
-        impl RomDataHandle for $type {
-            fn data_field_name() -> &'static str {
-                stringify!($field)
-            }
+        impl RomDataHandle for OwningRef<$type> {
+            type Target = $type;
 
-            fn data_deduper_for(data: &RomData) -> &DataDeduper<Self> {
-                &data.$field
+            fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target> {
+                data.$field.get(self).map(|e| &e.data)
             }
         }
     };
@@ -1175,6 +1177,7 @@ fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
 
 #[derive(Debug)]
 struct TemplateInternalState {
+    rom_data: Arc<RomData>,
     compression_queue: Mutex<Vec<PathBuf>>,
     out_dir: PathBuf,
 }
@@ -1185,9 +1188,11 @@ impl Object for TemplateInternalState {
     }
 }
 
+const INTERNAL_STATE_KEY: &str = "INTERNAL";
+
 fn get_internal_state(state: &State) -> Result<Arc<TemplateInternalState>, minijinja::Error> {
     Ok(state
-        .lookup("INTERNAL")
+        .lookup(INTERNAL_STATE_KEY)
         .and_then(|v| v.downcast_object())
         .unwrap())
 }
@@ -1232,10 +1237,12 @@ fn write_file_filter(
     }
 }
 
-fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
+fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
     let symbols = symbols_arc.as_ref();
+    let rom_data = rom_data_arc.as_ref();
 
     let internal_state = Arc::new(TemplateInternalState {
+        rom_data: rom_data_arc.clone(),
         compression_queue: Default::default(),
         out_dir: out_dir.to_path_buf(),
     });
@@ -1245,7 +1252,10 @@ fn emit_asm(rom_data: &RomData, symbols_arc: Arc<SymbolMap>, out_dir: &Path) -> 
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
     env.set_undefined_behavior(UndefinedBehavior::Strict);
-    env.add_global("INTERNAL", Value::from_dyn_object(internal_state.clone()));
+    env.add_global(
+        INTERNAL_STATE_KEY,
+        Value::from_dyn_object(internal_state.clone()),
+    );
     env.add_global("symbols", Value::from_dyn_object(symbols_arc.clone()));
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
@@ -1503,7 +1513,11 @@ fn main() -> Result<()> {
         let (room_id, room) = RoomHeader::from_xml(&mut rom_data, &xml_room, room_name)?;
         rom_data.rooms.insert(room_id, room);
     }
-    emit_asm(&rom_data, Arc::new(symbols), Path::new("../src/converted/"))?;
+    emit_asm(
+        Arc::new(rom_data),
+        Arc::new(symbols),
+        Path::new("../src/converted/"),
+    )?;
 
     Ok(())
 }
