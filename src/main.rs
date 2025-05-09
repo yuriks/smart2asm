@@ -182,7 +182,7 @@ impl<T> DataDeduper<T> {
     where
         F: FnMut(&mut Writer, &DeduperEntry<T>) -> Result<()>,
     {
-        for e in &self.entries {
+        for e in self.entries() {
             writeln!(w)?;
             for l in &e.labels {
                 writeln!(w, "{l}:")?;
@@ -286,6 +286,7 @@ impl RoomHeader {
 type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
 
 #[derive(Debug, Hash, Serialize)]
+#[serde(tag = "type")]
 enum ExitType {
     Elevator,
     Door(DoorHeader),
@@ -324,47 +325,6 @@ impl ExitType {
                 door_asm: DoorAsmType::from_xml(rom_data, &d.doorcode, exit_name)?,
             }),
         })
-    }
-
-    fn emit_asm(
-        &self,
-        w: &mut Writer,
-        symbols: &SymbolMap,
-        rooms: &BTreeMap<RoomId, RoomHeader>,
-    ) -> Result<()> {
-        let ExitType::Door(door) = self else {
-            writeln!(w, "    dw $0000")?;
-            return Ok(());
-        };
-
-        let Some(target_room) = rooms.get(&door.destination) else {
-            return Err(anyhow!(
-                "Door destination (${:02X},${:02X}) not found",
-                door.destination.0,
-                door.destination.1
-            ));
-        };
-        writeln!(w, "    dw RoomHeader_{}", target_room.name)?;
-        writeln!(
-            w,
-            "    db {},{},{},{},{},{}",
-            door.transition_flags,
-            door.transition_type,
-            door.doorcap_tile_x,
-            door.doorcap_tile_y,
-            door.destination_screen_x,
-            door.destination_screen_y
-        )?;
-        writeln!(w, "    dw {}", door.samus_slide_speed)?;
-        match &door.door_asm {
-            DoorAsmType::Address(addr) => {
-                writeln!(w, "    dw {}", symbols.resolve_label(0x8F, *addr))?
-            }
-            DoorAsmType::ScrollDataUpdate(ref_) => writeln!(w, "    dw {}", ref_.label())?,
-            DoorAsmType::DoorCode(ref_) => writeln!(w, "    dw {}", ref_.label())?,
-        }
-
-        Ok(())
     }
 }
 
@@ -1055,7 +1015,6 @@ impl LoadStation {
 #[derive(Default, Debug, Serialize)]
 struct RomData {
     rooms: BTreeMap<RoomId, RoomHeader>,
-    #[serde(skip)]
     doors: DataDeduper<ExitType>,
     #[serde(skip)]
     load_stations: BTreeMap<(HexU8, HexU8), LoadStation>, // key: (area index, load station index)
@@ -1200,15 +1159,9 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols_arc: Arc<SymbolMap>, out_dir: &P
         template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("door_headers.asm.j2")?;
         let mut f = File::create(out_dir.join("door_headers.asm"))?;
-        let mut w: Writer = BufWriter::new(&mut f);
-        for e in rom_data.doors.entries() {
-            writeln!(&mut w)?;
-            for l in &e.labels {
-                writeln!(&mut w, "{l}:")?;
-            }
-            e.data.emit_asm(&mut w, symbols, &rom_data.rooms)?;
-        }
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let mut f = File::create(out_dir.join("load_stations.asm"))?;

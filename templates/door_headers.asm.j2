@@ -1,0 +1,19 @@
+; Door headers
+{% for labels, d in data.doors %}
+
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+{% if d.type == "Elevator" %}
+    dw $0000
+{% else %}
+    dw RoomHeader_{{ data.rooms[d.destination].name }}
+    db {{ d.transition_flags }},{{ d.transition_type }},{{ d.doorcap_tile_x }},{{ d.doorcap_tile_y }},{{ d.destination_screen_x }},{{ d.destination_screen_y }}
+    dw {{ d.samus_slide_speed }}
+    {% if d.door_asm.Address is defined %}
+    dw {{ symbols.resolve_label(0x8F, d.door_asm.Address) }}
+    {% else %}
+    dw {{ d.door_asm.ScrollDataUpdate | default(d.door_asm.DoorCode) }}
+    {% endif %}
+{% endif %}
+{% endfor %}
