@@ -1,0 +1,23 @@
+; Load Stations
+
+LoadStationListPointers:
+{% for area in data.load_stations_per_area %}
+    dw {{ "LoadStations_Area"~loop.index0 if area else "$0000" }}
+{% endfor %}
+{% for area in data.load_stations_per_area %}
+
+LoadStations_Area{{ loop.index0 }}:
+{% for station in area %}
+{% if station %}
+    ; Station {{ loop.index0 | hex8 }}
+    {% set from_door_ref = station.from_door[0]().exits[station.from_door[1]] %}
+    dw RoomHeader_{{ station.room().name }}, {{ from_door_ref }}
+    {# samus_y comes before samus_x for some reason #}
+    dw {{ station.unused }},{{ station.screen_x }},{{ station.screen_y }},{{ station.samus_y }},{{ station.samus_x }}
+{% else %}
+    ; Station {{ loop.index0 | hex8 }} - Unused
+    dw $0000,$0000
+    dw $0000,$0000,$0000,$0000,$0000
+{% endif %}
+{% endfor %}
+{% endfor %}

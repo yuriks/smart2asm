@@ -10,5 +10,4 @@ glob = "0.3"
 anyhow = "1.0"
 heck = "0.5"
 bytemuck = { version = "1.21", features = ["min_const_generics"] }
-itertools = "0.14"
 minijinja = { version = "2.10", features = ["loader"] }

@@ -3,7 +3,6 @@ use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::xml_types::{DataOrAddress, DecompSection};
 use anyhow::{Result, anyhow};
 use glob::glob;
-use itertools::Itertools;
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
@@ -13,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::BufReader;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -191,8 +190,6 @@ impl<T: Serialize> Serialize for DataDeduper<T> {
     }
 }
 
-type Writer<'a> = BufWriter<&'a mut dyn Write>;
-
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 struct RoomId {
     area: u8,
@@ -234,8 +231,7 @@ where
     }
 }
 
-impl Object for RoomId
-{
+impl Object for RoomId {
     fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
         match key.as_str()? {
             "area" => Some(Value::from(self.area)),
@@ -309,9 +305,15 @@ impl RoomHeader {
             .collect::<Result<_>>()?;
         for xml_save in &xml_room.saves {
             let (save_id, save) = LoadStation::from_xml(rom_data, xml_save, room_id)?;
-            rom_data
-                .load_stations
-                .insert((xml_room.area, save_id), save);
+            let load_station =
+                get_load_station_mut(&mut rom_data.load_stations_per_area, xml_room.area, save_id);
+            if load_station.replace(save).is_some() {
+                return Err(anyhow!(
+                    "Duplicate load stations with (area={:?}, load_station={:?})",
+                    xml_room.area,
+                    save_id
+                ));
+            }
         }
 
         Ok((
@@ -332,6 +334,24 @@ impl RoomHeader {
             },
         ))
     }
+}
+
+fn get_load_station_mut(
+    stations_per_area: &mut Vec<Vec<Option<LoadStation>>>,
+    area: HexU8,
+    load_station: HexU8,
+) -> &mut Option<LoadStation> {
+    let area: usize = area.0.into();
+    if area >= stations_per_area.len() {
+        stations_per_area.resize_with(area + 1, Default::default);
+    }
+    let area_stations = &mut stations_per_area[area];
+
+    let load_station: usize = load_station.0.into();
+    if load_station >= area_stations.len() {
+        area_stations.resize_with(load_station + 1, Default::default);
+    }
+    &mut area_stations[load_station]
 }
 
 type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
@@ -995,7 +1015,7 @@ impl BgDataCommand {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct LoadStation {
     room: RoomId,
     from_door: DoorId,
@@ -1038,8 +1058,7 @@ impl LoadStation {
 struct RomData {
     rooms: BTreeMap<RoomId, RoomHeader>,
     doors: DataDeduper<ExitType>,
-    #[serde(skip)]
-    load_stations: BTreeMap<(HexU8, HexU8), LoadStation>, // key: (area index, load station index)
+    load_stations_per_area: Vec<Vec<Option<LoadStation>>>,
 
     compressed_level_data: DataDeduper<Vec<u8>>,
     fx_headers: DataDeduper<FxHeader>,
@@ -1170,6 +1189,7 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path)
         Value::from_dyn_object(internal_state.clone()),
     );
     env.add_global("symbols", Value::from_dyn_object(symbols.clone()));
+    env.add_filter("hex8", |val: u8| HexU8(val).to_string());
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
 
@@ -1184,79 +1204,9 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path)
         template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
+        let template = env.get_template("load_stations.asm.j2")?;
         let mut f = File::create(out_dir.join("load_stations.asm"))?;
-        let mut w: Writer = BufWriter::new(&mut f);
-
-        let num_areas = rom_data
-            .load_stations
-            .last_key_value()
-            .map_or(0, |((area_id, _), _)| area_id.0 + 1);
-        writeln!(&mut w, "LoadStationListPointers:")?;
-        for i in 0..num_areas {
-            let mut area_range = rom_data
-                .load_stations
-                .range((HexU8(i), HexU8(0))..(HexU8(i + 1), HexU8(0)));
-            if area_range.next().is_some() {
-                writeln!(&mut w, "    dw LoadStations_Area{i}")?;
-            } else {
-                writeln!(&mut w, "    dw $0000")?;
-            }
-        }
-        for (area, stations) in &rom_data
-            .load_stations
-            .iter()
-            .chunk_by(|((area_id, _), _)| area_id)
-        {
-            writeln!(&mut w, "\nLoadStations_Area{}:", area.0)?;
-            let mut current_idx = 0;
-            for ((_area_id, station_id), station) in stations {
-                while current_idx < station_id.0 {
-                    writeln!(&mut w, "    dw $0000,$0000")?;
-                    writeln!(&mut w, "    dw $0000,$0000,$0000,$0000,$0000 ; Unused")?;
-                    current_idx += 1;
-                }
-                let Some(target_room) = rom_data.rooms.get(&station.room) else {
-                    return Err(anyhow!(
-                        "Load station {} destination room {:?} not found",
-                        station_id,
-                        station.room,
-                    ));
-                };
-                let Some(from_door_room) = rom_data.rooms.get(&station.from_door.0) else {
-                    return Err(anyhow!(
-                        "Load station {} from_door room {:?} not found",
-                        station_id,
-                        station.from_door.0,
-                    ));
-                };
-                let Some(from_door_ref) = from_door_room.exits.get(station.from_door.1 as usize)
-                else {
-                    return Err(anyhow!(
-                        "Load station {} from_door exit ${:02X} not found",
-                        station_id,
-                        station.from_door.1,
-                    ));
-                };
-
-                writeln!(
-                    &mut w,
-                    "    dw RoomHeader_{}, {}",
-                    target_room.name,
-                    from_door_ref.label()
-                )?;
-                writeln!(
-                    &mut w,
-                    "    dw {},{},{},{},{} ; Station {}",
-                    station.unused,
-                    station.screen_x,
-                    station.screen_y,
-                    station.samus_y, // samus_y comes before samus_x for some reason
-                    station.samus_x,
-                    station_id,
-                )?;
-                current_idx += 1;
-            }
-        }
+        template.render_to_write(context!(data => rom_data), &mut f)?;
     }
     {
         let template = env.get_template("fx_headers.asm.j2")?;
