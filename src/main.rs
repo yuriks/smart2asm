@@ -1170,6 +1170,23 @@ fn write_file_filter(
     }
 }
 
+const TEMPLATE_FILE_LIST: &[&str] = &[
+    "room_headers.asm",
+    "door_headers.asm",
+    "load_stations.asm",
+    "fx_headers.asm",
+    "enemy_populations.asm",
+    "enemy_gfx_sets.asm",
+    "room_scroll_data.asm",
+    "plm_populations.asm",
+    "plm_param_scrolldata.asm",
+    "bgdata_commands.asm",
+    "doorcode_scroll_updates.asm",
+    "doorcode_raw.asm",
+    "level_data.asm",
+    "bgdata_data.asm",
+];
+
 fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
     let rom_data = rom_data_arc.as_ref();
 
@@ -1193,77 +1210,11 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path)
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
 
-    {
-        let template = env.get_template("room_headers.asm.j2")?;
-        let mut f = File::create(out_dir.join("room_headers.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("door_headers.asm.j2")?;
-        let mut f = File::create(out_dir.join("door_headers.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("load_stations.asm.j2")?;
-        let mut f = File::create(out_dir.join("load_stations.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("fx_headers.asm.j2")?;
-        let mut f = File::create(out_dir.join("fx_headers.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("enemy_populations.asm.j2")?;
-        let mut f = File::create(out_dir.join("enemy_populations.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("enemy_gfx_sets.asm.j2")?;
-        let mut f = File::create(out_dir.join("enemy_gfx_sets.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("room_scroll_data.asm.j2")?;
-        let mut f = File::create(out_dir.join("room_scroll_data.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("plm_populations.asm.j2")?;
-        let mut f = File::create(out_dir.join("plm_populations.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("plm_param_scrolldata.asm.j2")?;
-        let mut f = File::create(out_dir.join("plm_param_scrolldata.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("bgdata_commands.asm.j2")?;
-        let mut f = File::create(out_dir.join("bgdata_commands.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("doorcode_scroll_updates.asm.j2")?;
-        let mut f = File::create(out_dir.join("doorcode_scroll_updates.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("doorcode_raw.asm.j2")?;
-        let mut f = File::create(out_dir.join("doorcode_raw.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    println!("Writing and compressing binary data...");
-
-    {
-        let template = env.get_template("level_data.asm.j2")?;
-        let mut f = File::create(out_dir.join("level_data.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
-    }
-    {
-        let template = env.get_template("bgdata_data.asm.j2")?;
-        let mut f = File::create(out_dir.join("bgdata_data.asm"))?;
-        template.render_to_write(context!(data => rom_data), &mut f)?;
+    let template_context = context!(data => rom_data);
+    for &fname in TEMPLATE_FILE_LIST {
+        let template = env.get_template(&format!("{fname}.j2"))?;
+        let mut f = File::create(out_dir.join(fname))?;
+        template.render_to_write(&template_context, &mut f)?;
     }
 
     // TODO: Parallelize
@@ -1353,6 +1304,7 @@ fn main() -> Result<()> {
         let (room_id, room) = RoomHeader::from_xml(&mut rom_data, &xml_room, room_name)?;
         rom_data.rooms.insert(room_id, room);
     }
+    println!("Processing templates...");
     emit_asm(
         Arc::new(rom_data),
         Arc::new(symbols),
