@@ -111,7 +111,7 @@ where
         let () = value::from_args(args)?;
         let internal_state = get_internal_state(state)?;
         let object = self
-            .resolve(&*internal_state.rom_data)
+            .resolve(&internal_state.rom_data)
             .ok_or(ErrorKind::UndefinedError)?;
         Ok(Value::from_serialize(object))
     }
@@ -222,7 +222,7 @@ where
         S: Serializer,
     {
         if value::serializing_for_value() {
-            return Value::from_object(self.clone()).serialize(serializer);
+            return Value::from_object(*self).serialize(serializer);
         }
         let mut s = serializer.serialize_struct("RoomId", 2)?;
         s.serialize_field("area", &self.area)?;
@@ -248,7 +248,7 @@ impl Object for RoomId {
         let () = value::from_args(args)?;
         let internal_state = get_internal_state(state)?;
         let object = self
-            .resolve(&*internal_state.rom_data)
+            .resolve(&internal_state.rom_data)
             .ok_or(ErrorKind::UndefinedError)?;
         Ok(Value::from_serialize(object))
     }
@@ -549,7 +549,7 @@ fn level_data_from_xml(xml: &xml_types::LevelData) -> Result<Vec<u8>> {
     let total_tiles = screens * TILES_PER_SCREEN;
 
     let layer1_size = total_tiles * 2;
-    let bts_size = total_tiles * 1;
+    let bts_size = total_tiles;
     let layer2_size = if xml.layer2.is_some() {
         total_tiles * 2
     } else {
@@ -986,8 +986,8 @@ impl BgDataCommand {
                     }
                 };
                 let (section_start, section_size) = match section {
-                    DecompSection::GFX => (0x0, 0x4000),
-                    DecompSection::GFX3 => (0x4000, 0x800),
+                    DecompSection::Gfx => (0x0, 0x4000),
+                    DecompSection::Gfx3 => (0x4000, 0x800),
                     DecompSection::Tiles2 => (0x4800, 0x800),
                     DecompSection::Tiles1 => (0x5000, 0x800),
                     DecompSection::Tiles3 => (0x5800, 0x800),
@@ -1266,7 +1266,7 @@ fn main() -> Result<()> {
         let path = match entry {
             Ok(path) => path,
             Err(e) => {
-                eprintln!("Failed to read path: {}", e);
+                eprintln!("Failed to read path: {e}");
                 continue;
             }
         };

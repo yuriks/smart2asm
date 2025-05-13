@@ -207,7 +207,7 @@ impl<'de> Deserialize<'de> for DataOrAddress {
         }
         let vals = s
             .split_ascii_whitespace()
-            .map(|t| HexU16::from_str(t))
+            .map(HexU16::from_str)
             .collect::<Result<Vec<HexU16>, _>>()
             .map_err(serde::de::Error::custom)?;
         Ok(DataOrAddress::Data(vals))
@@ -216,8 +216,10 @@ impl<'de> Deserialize<'de> for DataOrAddress {
 
 #[derive(Debug, Deserialize)]
 pub enum DecompSection {
-    GFX,
-    GFX3,
+    #[serde(rename = "GFX")]
+    Gfx,
+    #[serde(rename = "GFX3")]
+    Gfx3,
     Tiles2,
     Tiles1,
     Tiles3,

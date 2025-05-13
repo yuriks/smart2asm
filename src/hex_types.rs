@@ -336,10 +336,13 @@ impl FromStr for HexValue {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let trimmed = s.strip_prefix('$').unwrap_or(s);
         let val = u32::from_str_radix(trimmed, 16)?;
-        Ok(match s.chars().count() {
-            ..=2 => HexValue::Byte(HexU8(val as u8)),
-            ..=4 => HexValue::Word(HexU16(val as u16)),
-            _ => HexValue::Long(HexU24(val as u32)),
+        Ok(match trimmed.chars().count() {
+            0 => unreachable!("successfully parsed number string will always be non-empty"),
+            1..=2 => HexValue::Byte(HexU8(val as u8)),
+            3..=4 => HexValue::Word(HexU16(val as u16)),
+            5..=6 => HexValue::Long(HexU24(val)),
+            // Crappy way of generating a ParseIntError with kind PosOverflow
+            _ => return Err(u8::from_str_radix("FFF", 16).unwrap_err()),
         })
     }
 }
@@ -381,5 +384,42 @@ impl Object for HexValue {
             }
             _ => Err(Error::from(minijinja::ErrorKind::UnknownMethod)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hexvalue_fromstr() {
+        assert_eq!(HexValue::from_str("$A"), Ok(HexValue::Byte(HexU8(0x0A))));
+        assert_eq!(HexValue::from_str("$AB"), Ok(HexValue::Byte(HexU8(0xAB))));
+        assert_eq!(
+            HexValue::from_str("$ABC"),
+            Ok(HexValue::Word(HexU16(0x0ABC)))
+        );
+        assert_eq!(
+            HexValue::from_str("$ABCD"),
+            Ok(HexValue::Word(HexU16(0xABCD)))
+        );
+        assert_eq!(
+            HexValue::from_str("$ABCDE"),
+            Ok(HexValue::Long(HexU24(0x0ABCDE)))
+        );
+        assert_eq!(
+            HexValue::from_str("$ABCDEF"),
+            Ok(HexValue::Long(HexU24(0xABCDEF)))
+        );
+
+        assert_eq!(HexValue::from_str("1234"), HexValue::from_str("$1234"));
+        assert_eq!(
+            HexValue::from_str("$").unwrap_err().kind(),
+            &std::num::IntErrorKind::Empty
+        );
+        assert_eq!(
+            HexValue::from_str("$ABCDEF0").unwrap_err().kind(),
+            &std::num::IntErrorKind::PosOverflow
+        );
     }
 }
