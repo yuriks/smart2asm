@@ -1,6 +1,7 @@
 use crate::asm::SymbolMap;
+use crate::config::AppConfig;
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use glob::glob;
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::{fs, io};
 
 mod asm;
+mod config;
 mod hex_types;
 mod xml_conversion;
 mod xml_types;
@@ -623,13 +625,13 @@ const TEMPLATE_FILE_LIST: &[&str] = &[
     "bgdata_data.asm",
 ];
 
-fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path) -> Result<()> {
+fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>) -> Result<()> {
     let rom_data = rom_data_arc.as_ref();
 
     let internal_state = Arc::new(TemplateInternalState {
         rom_data: rom_data_arc.clone(),
         compression_queue: Default::default(),
-        out_dir: out_dir.to_path_buf(),
+        out_dir: config.output_dir.clone(),
     });
 
     let mut env = Environment::new();
@@ -649,14 +651,14 @@ fn emit_asm(rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>, out_dir: &Path)
     let template_context = context!(data => rom_data);
     for &fname in TEMPLATE_FILE_LIST {
         let template = env.get_template(&format!("{fname}.j2"))?;
-        let mut f = File::create(out_dir.join(fname))?;
+        let mut f = File::create(config.output_dir.join(fname))?;
         template.render_to_write(&template_context, &mut f)?;
     }
 
     // TODO: Parallelize
     for f in internal_state.compression_queue.lock().unwrap().drain(..) {
         println!("Compressing {}...", f.display());
-        compress_lz5_file(&f)?;
+        compress_lz5_file(config, &f)?;
     }
     Ok(())
 }
@@ -682,8 +684,8 @@ fn write_file_if_not_matching(path: &Path, data: &[u8]) -> Result<bool, io::Erro
     Ok(update_needed)
 }
 
-fn compress_lz5_file(path: &Path) -> Result<()> {
-    let status = Command::new("./AmoebaCompress.exe")
+fn compress_lz5_file(config: &AppConfig, path: &Path) -> Result<()> {
+    let status = Command::new(&config.compressor_path)
         .arg("-c") // Compress
         .arg("-f") // Input file
         .arg(path)
@@ -695,10 +697,17 @@ fn compress_lz5_file(path: &Path) -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+fn load_rooms_from_smart(
+    project_path: &Path,
+) -> Result<BTreeMap<(HexU8, HexU8), (String, xml_types::Room)>> {
     let mut rooms = BTreeMap::new();
 
-    for entry in glob("../smart_xml/Export/Rooms/*.xml")? {
+    for entry in glob(
+        project_path
+            .join("Export/Rooms/*.xml")
+            .to_str()
+            .context("input path is not valid UTF-8")?,
+    )? {
         let path = match entry {
             Ok(path) => path,
             Err(e) => {
@@ -730,9 +739,16 @@ fn main() -> Result<()> {
         }
     }
     println!("Loaded {} rooms.", rooms.len());
+    Ok(rooms)
+}
+
+fn main() -> Result<()> {
+    let config = config::make_option_parser().run();
+
+    let rooms = load_rooms_from_smart(&config.input_dir)?;
 
     println!("Loading symbol map...");
-    let symbols = SymbolMap::from_wla_sym(File::open("../vanilla.sym")?)?;
+    let symbols = SymbolMap::from_wla_sym(File::open(&config.vanilla_symbols_file)?)?;
 
     let mut rom_data = RomData::default();
     for ((area_index, room_index), (room_name, xml_room)) in rooms {
@@ -741,11 +757,7 @@ fn main() -> Result<()> {
         rom_data.rooms.insert(room_id, room);
     }
     println!("Processing templates...");
-    emit_asm(
-        Arc::new(rom_data),
-        Arc::new(symbols),
-        Path::new("../src/converted/"),
-    )?;
+    emit_asm(&config, Arc::new(rom_data), Arc::new(symbols))?;
 
     Ok(())
 }
