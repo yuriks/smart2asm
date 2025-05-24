@@ -743,7 +743,7 @@ fn load_rooms_from_smart(
 }
 
 fn main() -> Result<()> {
-    let config = config::make_option_parser().run();
+    let config = config::app_config().run();
 
     let rooms = load_rooms_from_smart(&config.input_dir)?;
 
