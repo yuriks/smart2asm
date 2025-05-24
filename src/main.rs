@@ -1,6 +1,7 @@
 use crate::asm::SymbolMap;
 use crate::config::AppConfig;
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
+use crate::util::IgnoreMutexPoison;
 use anyhow::{Context, Result, anyhow};
 use glob::glob;
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr};
@@ -22,6 +23,7 @@ use std::{fs, io};
 mod asm;
 mod config;
 mod hex_types;
+mod util;
 mod xml_conversion;
 mod xml_types;
 
@@ -93,6 +95,19 @@ trait RomDataHandle {
     fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target>;
 }
 
+fn deref_handle_to_value<T: RomDataHandle<Target: Serialize>>(
+    handle: &Arc<T>,
+    state: &State,
+    args: &[Value],
+) -> Result<Value, minijinja::Error> {
+    let () = value::from_args(args)?;
+    let internal_state = get_internal_state(state)?;
+    let object = handle
+        .resolve(&internal_state.rom_data)
+        .ok_or(ErrorKind::UndefinedError)?;
+    Ok(Value::from_serialize(object))
+}
+
 impl<T> Object for OwningRef<T>
 where
     Self: RomDataHandle,
@@ -110,12 +125,7 @@ where
     }
 
     fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
-        let () = value::from_args(args)?;
-        let internal_state = get_internal_state(state)?;
-        let object = self
-            .resolve(&internal_state.rom_data)
-            .ok_or(ErrorKind::UndefinedError)?;
-        Ok(Value::from_serialize(object))
+        deref_handle_to_value(self, state, args)
     }
 
     fn render(self: &Arc<Self>, f: &mut Formatter) -> std::fmt::Result
@@ -247,12 +257,7 @@ impl Object for RoomId {
     }
 
     fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
-        let () = value::from_args(args)?;
-        let internal_state = get_internal_state(state)?;
-        let object = self
-            .resolve(&internal_state.rom_data)
-            .ok_or(ErrorKind::UndefinedError)?;
-        Ok(Value::from_serialize(object))
+        deref_handle_to_value(self, state, args)
     }
 }
 
@@ -656,7 +661,7 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     }
 
     // TODO: Parallelize
-    for f in internal_state.compression_queue.lock().unwrap().drain(..) {
+    for f in internal_state.compression_queue.lock_unpoisoned().drain(..) {
         println!("Compressing {}...", f.display());
         compress_lz5_file(config, &f)?;
     }
