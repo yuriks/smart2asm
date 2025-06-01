@@ -2,7 +2,7 @@ use crate::asm::SymbolMap;
 use crate::config::AppConfig;
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::util::IgnoreMutexPoison;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr, ValueKind};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
@@ -689,26 +689,6 @@ fn hex24_filter(value: &Value) -> Result<String, minijinja::Error> {
     }
 }
 
-const TEMPLATE_FILE_LIST: &[&str] = &[
-    "room_headers.asm",
-    "door_headers.asm",
-    "load_stations.asm",
-    "fx_headers.asm",
-    "enemy_populations.asm",
-    "enemy_gfx_sets.asm",
-    "room_scroll_data.asm",
-    "plm_populations.asm",
-    "plm_param_scrolldata.asm",
-    "bgdata_commands.asm",
-    "doorcode_scroll_updates.asm",
-    "doorcode_raw.asm",
-    "level_data.asm",
-    "bgdata_data.asm",
-    "defines.asm",
-    "area_maps.asm",
-    "area_map_tilemaps.asm",
-];
-
 fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>) -> Result<()> {
     let rom_data = rom_data_arc.as_ref();
 
@@ -736,9 +716,24 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     env.add_filter("write_file", write_file_filter);
 
     let template_context = context!(data => rom_data);
-    for &fname in TEMPLATE_FILE_LIST {
-        let template = env.get_template(&format!("{fname}.j2"))?;
-        let mut f = BufWriter::new(File::create(config.output_dir.join(fname))?);
+    for glob_entry in glob::glob(
+        config
+            .templates_dir
+            .join("*.j2")
+            .to_str()
+            .context("input path is not valid UTF-8")?,
+    )? {
+        let template_path = glob_entry.context("Failed to read template path")?;
+        let template_fname = template_path.file_name().expect("path with filename");
+        let template_name = template_fname
+            .to_str()
+            .with_context(|| format!("template {template_fname:?} has non-UTF-8 name"))?;
+        let template = env.get_template(template_name)?;
+
+        let fname = template_name.strip_suffix(".j2").expect("`.j2` suffix");
+        let output_path = config.output_dir.join(fname);
+        println!("Generating {}", output_path.display());
+        let mut f = BufWriter::new(File::create(output_path)?);
         template.render_to_write(&template_context, &mut f)?;
     }
 
