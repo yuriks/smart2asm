@@ -1,3 +1,4 @@
+use bytemuck::TransparentWrapper;
 use minijinja::value::{Object, ObjectRepr};
 use minijinja::{Error, State, Value, value};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -34,7 +35,7 @@ where
     }
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, TransparentWrapper)]
 #[repr(transparent)]
 pub struct HexU8(pub u8);
 
@@ -109,7 +110,7 @@ impl<'de> Deserialize<'de> for HexU8 {
     }
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, TransparentWrapper)]
 #[repr(transparent)]
 pub struct HexU16(pub u16);
 
@@ -184,7 +185,7 @@ impl<'de> Deserialize<'de> for HexU16 {
     }
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, TransparentWrapper)]
 #[repr(transparent)]
 pub struct HexU24(pub u32);
 

@@ -1,0 +1,10 @@
+; Area Map Tilemaps
+{% for area in data.area_maps %}
+{% if area %}
+
+MapTilemaps_Area{{ loop.index0 }}:
+{% for line in area.tilemap | batch(8) %}
+    dw {{ line | h16 }}
+{% endfor %}
+{% endif %}
+{% endfor %}

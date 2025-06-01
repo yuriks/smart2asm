@@ -1,18 +1,20 @@
 use crate::hex_types::{HexU8, HexU16, HexU24};
 use crate::{
-    BgDataCommand, BgDataSource, CodeInstruction, CopyCommandParams, DoorAsmType, DoorHeader,
-    EnemyGfxSet, EnemyGfxSetEntry, EnemyPopulation, EnemyPopulationEntry, ExitType, FxHeader,
-    FxHeaderEntry, LoadStation, PlmParam, PlmPopulation, PlmPopulationEntry, RomData, RoomHeader,
-    RoomId, RoomState, ScrollDataChange, ScrollDataKind, TILES_PER_SCREEN, xml_types,
+    AreaMap, BgDataCommand, BgDataSource, CodeInstruction, CopyCommandParams, DoorAsmType,
+    DoorHeader, EnemyGfxSet, EnemyGfxSetEntry, EnemyPopulation, EnemyPopulationEntry, ExitType,
+    FxHeader, FxHeaderEntry, LoadStation, MapIcon, MapLabel, PlmParam, PlmPopulation,
+    PlmPopulationEntry, RomData, RoomHeader, RoomId, RoomState, ScrollDataChange, ScrollDataKind,
+    TILES_PER_SCREEN, xml_types,
 };
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
+use bytemuck::allocation::TransparentWrapperAlloc;
 
 impl RoomHeader {
     pub fn from_xml(
         rom_data: &mut RomData,
         xml_room: &xml_types::Room,
         room_name: String,
-    ) -> anyhow::Result<(RoomId, RoomHeader)> {
+    ) -> Result<(RoomId, RoomHeader)> {
         let room_id = RoomId {
             area: xml_room.area.0,
             room: xml_room.index.0,
@@ -26,21 +28,21 @@ impl RoomHeader {
                 let exit = ExitType::from_xml(rom_data, x, &exit_name)?;
                 Ok(rom_data.doors.insert(exit, format!("Door_{exit_name}")))
             })
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<Result<_>>()?;
         let states = xml_room
             .states
             .iter()
             .rev() // SMART Saves room states in reverse order
             .enumerate()
             .map(|(i, x)| RoomState::from_xml(rom_data, x, format!("{room_name}_{i}")))
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<Result<_>>()?;
         for xml_save in &xml_room.saves {
             let (save_id, save) = LoadStation::from_xml(rom_data, xml_save, room_id)?;
-            let load_station = crate::get_load_station_mut(
-                &mut rom_data.load_stations_per_area,
-                xml_room.area,
-                save_id,
-            );
+            let stations_per_area = &mut rom_data.load_stations_per_area;
+            let HexU8(area) = xml_room.area;
+            let HexU8(load_station1) = save_id;
+            let area_stations = crate::get_or_insert_default(stations_per_area, area.into());
+            let load_station = crate::get_or_insert_default(area_stations, load_station1.into());
             if load_station.replace(save).is_some() {
                 return Err(anyhow!(
                     "Duplicate load stations with (area={:?}, load_station={:?})",
@@ -75,7 +77,7 @@ impl ExitType {
         rom_data: &mut RomData,
         xml: &xml_types::DoorEntry,
         exit_name: &str,
-    ) -> anyhow::Result<ExitType> {
+    ) -> Result<ExitType> {
         Ok(match xml {
             xml_types::DoorEntry::Elevator => ExitType::Elevator,
             xml_types::DoorEntry::Door(d) => ExitType::Door(DoorHeader {
@@ -111,7 +113,7 @@ impl DoorAsmType {
         rom_data: &mut RomData,
         xml: &xml_types::DoorCode,
         exit_name: &str,
-    ) -> anyhow::Result<DoorAsmType> {
+    ) -> Result<DoorAsmType> {
         if 1 != crate::count_true([
             !xml.ops.is_empty(),
             xml.scroll_data.is_some(),
@@ -153,7 +155,7 @@ fn copy_layer_tiles<T, U>(
     height: usize,
     dst_data: &mut [U],
     f: impl Fn(&T, &mut U),
-) -> anyhow::Result<()> {
+) -> Result<()> {
     for screen in &src_layer.screens {
         if screen.x.0 as usize >= width || screen.y.0 as usize >= height {
             return Err(anyhow!(
@@ -183,7 +185,7 @@ fn copy_layer_tiles<T, U>(
     Ok(())
 }
 
-fn level_data_from_xml(xml: &xml_types::LevelData) -> anyhow::Result<Vec<u8>> {
+fn level_data_from_xml(xml: &xml_types::LevelData) -> Result<Vec<u8>> {
     let width = xml.width.0 as usize;
     let height = xml.height.0 as usize;
     let screens = width * xml.height.0 as usize;
@@ -231,7 +233,7 @@ impl RoomState {
         rom_data: &mut RomData,
         xml: &xml_types::RoomState,
         state_name: String,
-    ) -> anyhow::Result<RoomState> {
+    ) -> Result<RoomState> {
         let level_data_ref = rom_data.compressed_level_data.insert(
             level_data_from_xml(&xml.level_data)?,
             format!("LevelData_{state_name}"),
@@ -299,10 +301,7 @@ impl RoomState {
 }
 
 impl FxHeaderEntry {
-    fn from_xml(
-        _rom_data: &mut RomData,
-        xml: &[xml_types::Fx1],
-    ) -> anyhow::Result<Option<FxHeader>> {
+    fn from_xml(_rom_data: &mut RomData, xml: &[xml_types::Fx1]) -> Result<Option<FxHeader>> {
         if xml.is_empty() {
             return Ok(None);
         }
@@ -347,7 +346,7 @@ impl FxHeaderEntry {
                     palette_blend_index: fx.paletteblend,
                 })
             })
-            .collect::<anyhow::Result<_>>()
+            .collect::<Result<_>>()
             .map(Some)
     }
 }
@@ -390,7 +389,7 @@ impl ScrollDataKind {
         rom_data: &mut RomData,
         xml: &xml_types::ScrollData,
         state_name: &str,
-    ) -> anyhow::Result<ScrollDataKind> {
+    ) -> Result<ScrollDataKind> {
         match (xml.const_, xml.data.is_empty()) {
             (Some(fixed), true) => Ok(ScrollDataKind::Fixed(fixed)),
             (None, false) => Ok(ScrollDataKind::Ref(
@@ -408,7 +407,7 @@ impl PlmPopulationEntry {
         rom_data: &mut RomData,
         xml: &[xml_types::Plm],
         state_name: &str,
-    ) -> anyhow::Result<PlmPopulation> {
+    ) -> Result<PlmPopulation> {
         xml.iter()
             .enumerate()
             .map(|(i, plm)| {
@@ -436,7 +435,7 @@ impl PlmPopulationEntry {
                     param,
                 })
             })
-            .collect::<anyhow::Result<_>>()
+            .collect::<Result<_>>()
     }
 }
 
@@ -445,7 +444,7 @@ impl BgDataCommand {
         rom_data: &mut RomData,
         xml: &[xml_types::BgDataEntry],
         state_name: &str,
-    ) -> anyhow::Result<Vec<BgDataCommand>> {
+    ) -> Result<Vec<BgDataCommand>> {
         let mut entries = Vec::new();
         for (i, c) in xml.iter().enumerate() {
             let cmd_name = &format!("{state_name}_Cmd{i}");
@@ -554,7 +553,7 @@ impl LoadStation {
         _rom_data: &mut RomData,
         xml: &xml_types::SaveRoom,
         room_id: RoomId,
-    ) -> anyhow::Result<(HexU8, LoadStation)> {
+    ) -> Result<(HexU8, LoadStation)> {
         let from_door = (
             RoomId {
                 area: xml.indoor.room_area.0,
@@ -574,5 +573,45 @@ impl LoadStation {
                 samus_y: xml.samusy,
             },
         ))
+    }
+}
+
+impl From<xml_types::Label> for MapLabel {
+    fn from(value: xml_types::Label) -> Self {
+        MapLabel {
+            x: value.x.into(),
+            y: value.y.into(),
+            gfx: value.gfx,
+        }
+    }
+}
+
+impl From<xml_types::Icon> for MapIcon {
+    fn from(value: xml_types::Icon) -> Self {
+        MapIcon {
+            x: value.x.into(),
+            y: value.y.into(),
+        }
+    }
+}
+
+fn convert_vec<T: Into<U>, U>(v: Vec<T>) -> Vec<U> {
+    v.into_iter().map(|x| x.into()).collect()
+}
+
+impl AreaMap {
+    pub fn from_xml(xml: xml_types::Map) -> Result<AreaMap> {
+        let area_map = AreaMap {
+            tilemap: HexU16::peel_vec(xml.tile_data),
+            title_tilemap: HexU16::peel_vec(xml.area_name),
+            revealed_tiles_bitmask: HexU8::peel_vec(xml.map_station_data),
+            area_labels: convert_vec(xml.area_labels),
+            boss_icons: convert_vec(xml.boss_icons),
+            missile_icons: convert_vec(xml.missile_icons),
+            energy_icons: convert_vec(xml.energy_icons),
+            map_icons: convert_vec(xml.map_icons),
+            save_icons: convert_vec(xml.save_icons),
+        };
+        Ok(area_map)
     }
 }

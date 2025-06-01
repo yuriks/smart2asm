@@ -9,6 +9,6 @@ quick-xml = { version = "0.37", features = ["serialize", "serde-types"] }
 glob = "0.3"
 anyhow = "1.0"
 heck = "0.5"
-bytemuck = { version = "1.21", features = ["min_const_generics"] }
+bytemuck = { version = "1.21", features = ["min_const_generics", "extern_crate_alloc", "derive"] }
 minijinja = { version = "2.10", features = ["loader"] }
 bpaf = { version = "0.9.19", features = ["derive", "dull-color"] }

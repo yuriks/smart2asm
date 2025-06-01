@@ -2,18 +2,17 @@ use crate::asm::SymbolMap;
 use crate::config::AppConfig;
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::util::IgnoreMutexPoison;
-use anyhow::{Context, Result, anyhow};
-use glob::glob;
-use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr};
+use anyhow::{Result, anyhow};
+use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr, ValueKind};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
+use std::fmt::{Display, Write};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::BufReader;
+use std::io::BufWriter;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -283,22 +282,11 @@ struct RoomHeader {
     states: Vec<RoomState>,
 }
 
-fn get_load_station_mut(
-    stations_per_area: &mut Vec<Vec<Option<LoadStation>>>,
-    area: HexU8,
-    load_station: HexU8,
-) -> &mut Option<LoadStation> {
-    let area: usize = area.0.into();
-    if area >= stations_per_area.len() {
-        stations_per_area.resize_with(area + 1, Default::default);
+fn get_or_insert_default<T: Default>(vec: &mut Vec<T>, i: usize) -> &mut T {
+    if i >= vec.len() {
+        vec.resize_with(i + 1, Default::default);
     }
-    let area_stations = &mut stations_per_area[area];
-
-    let load_station: usize = load_station.0.into();
-    if load_station >= area_stations.len() {
-        area_stations.resize_with(load_station + 1, Default::default);
-    }
-    &mut area_stations[load_station]
+    &mut vec[i]
 }
 
 type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
@@ -497,8 +485,36 @@ struct LoadStation {
     samus_y: HexU16,
 }
 
+#[derive(Debug, Serialize)]
+struct MapLabel {
+    x: u16,
+    y: u16,
+    gfx: HexU16,
+}
+
+#[derive(Debug, Serialize)]
+struct MapIcon {
+    x: u16,
+    y: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct AreaMap {
+    tilemap: Vec<u16>,
+    title_tilemap: Vec<u16>,
+    revealed_tiles_bitmask: Vec<u8>,
+
+    area_labels: Vec<MapLabel>,
+    boss_icons: Vec<MapIcon>,
+    missile_icons: Vec<MapIcon>,
+    energy_icons: Vec<MapIcon>,
+    map_icons: Vec<MapIcon>,
+    save_icons: Vec<MapIcon>,
+}
+
 #[derive(Default, Debug, Serialize)]
 struct RomData {
+    // Room-rooted data
     rooms: BTreeMap<RoomId, RoomHeader>,
     doors: DataDeduper<ExitType>,
     load_stations_per_area: Vec<Vec<Option<LoadStation>>>,
@@ -515,6 +531,9 @@ struct RomData {
 
     doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>,
     doorcode_raw: DataDeduper<Vec<CodeInstruction>>,
+
+    // AreaMap-rooted data
+    area_maps: Vec<Option<AreaMap>>,
 }
 
 macro_rules! impl_rom_data_handle {
@@ -543,13 +562,6 @@ impl_rom_data_handle!(bgdata_commands: BgDataCommandList);
 impl_rom_data_handle!(bgdata_tile_data: (Vec<u8>, bool));
 // doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>
 impl_rom_data_handle!(doorcode_raw: Vec<CodeInstruction>);
-
-fn read_room_xml(path: PathBuf) -> Result<xml_types::Room> {
-    println!("Parsing {}...", path.display());
-    let file = BufReader::new(File::open(path)?);
-    let parsed = quick_xml::de::from_reader(file)?;
-    Ok(parsed)
-}
 
 #[derive(Debug)]
 struct TemplateInternalState {
@@ -613,6 +625,70 @@ fn write_file_filter(
     }
 }
 
+fn join_with_commas<T: Display, E>(
+    mut iter: impl Iterator<Item = Result<T, E>>,
+) -> Result<String, E> {
+    iter.try_fold(String::new(), |mut result, el| {
+        if !result.is_empty() {
+            result.push(',');
+        }
+        write!(&mut result, "{}", el?).unwrap();
+        Ok(result)
+    })
+}
+
+fn hex8_filter(value: &Value) -> Result<String, minijinja::Error> {
+    match value.kind() {
+        ValueKind::Number => {
+            let num_val = u8::try_from(value.clone())?;
+            Ok(HexU8(num_val).to_string())
+        }
+        ValueKind::Bytes => {
+            join_with_commas(value.as_bytes().unwrap().iter().map(|&b| Ok(HexU8(b))))
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            join_with_commas(value.try_iter()?.map(|el| u8::try_from(el).map(HexU8)))
+        }
+        _ => Err(minijinja::Error::new(
+            ErrorKind::InvalidOperation,
+            "cannot format value as hex8",
+        )),
+    }
+}
+
+fn hex16_filter(value: &Value) -> Result<String, minijinja::Error> {
+    match value.kind() {
+        ValueKind::Number => {
+            let num_val = u16::try_from(value.clone())?;
+            Ok(HexU16(num_val).to_string())
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            join_with_commas(value.try_iter()?.map(|el| u16::try_from(el).map(HexU16)))
+        }
+        _ => Err(minijinja::Error::new(
+            ErrorKind::InvalidOperation,
+            "cannot format value as hex16",
+        )),
+    }
+}
+
+fn hex24_filter(value: &Value) -> Result<String, minijinja::Error> {
+    match value.kind() {
+        ValueKind::Number => {
+            // TODO: Overflow range checking
+            let num_val = u32::try_from(value.clone())?;
+            Ok(HexU24(num_val).to_string())
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            join_with_commas(value.try_iter()?.map(|el| u32::try_from(el).map(HexU24)))
+        }
+        _ => Err(minijinja::Error::new(
+            ErrorKind::InvalidOperation,
+            "cannot format value as hex24",
+        )),
+    }
+}
+
 const TEMPLATE_FILE_LIST: &[&str] = &[
     "room_headers.asm",
     "door_headers.asm",
@@ -628,6 +704,9 @@ const TEMPLATE_FILE_LIST: &[&str] = &[
     "doorcode_raw.asm",
     "level_data.asm",
     "bgdata_data.asm",
+    "defines.asm",
+    "area_maps.asm",
+    "area_map_tilemaps.asm",
 ];
 
 fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>) -> Result<()> {
@@ -649,14 +728,17 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
         Value::from_dyn_object(internal_state.clone()),
     );
     env.add_global("symbols", Value::from_dyn_object(symbols.clone()));
-    env.add_filter("hex8", |val: u8| HexU8(val).to_string());
+    env.add_filter("hex8", hex8_filter);
+    env.add_filter("h8", hex8_filter);
+    env.add_filter("h16", hex16_filter);
+    env.add_filter("h24", hex24_filter);
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
 
     let template_context = context!(data => rom_data);
     for &fname in TEMPLATE_FILE_LIST {
         let template = env.get_template(&format!("{fname}.j2"))?;
-        let mut f = File::create(config.output_dir.join(fname))?;
+        let mut f = BufWriter::new(File::create(config.output_dir.join(fname))?);
         template.render_to_write(&template_context, &mut f)?;
     }
 
@@ -702,55 +784,11 @@ fn compress_lz5_file(config: &AppConfig, path: &Path) -> Result<()> {
     }
 }
 
-fn load_rooms_from_smart(
-    project_path: &Path,
-) -> Result<BTreeMap<(HexU8, HexU8), (String, xml_types::Room)>> {
-    let mut rooms = BTreeMap::new();
-
-    for entry in glob(
-        project_path
-            .join("Export/Rooms/*.xml")
-            .to_str()
-            .context("input path is not valid UTF-8")?,
-    )? {
-        let path = match entry {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("Failed to read path: {e}");
-                continue;
-            }
-        };
-
-        use heck::ToUpperCamelCase;
-
-        let room_name = path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_upper_camel_case();
-        let room = read_room_xml(path)?;
-
-        match rooms.entry((room.area, room.index)) {
-            Entry::Vacant(e) => {
-                e.insert((room_name, room));
-            }
-            Entry::Occupied(e) => {
-                let (area_index, room_index) = e.key();
-                let old_name = &e.get().0;
-                panic!(
-                    "Duplicate rooms with id ({area_index},{room_index}): \"{old_name}\" and \"{room_name}\""
-                )
-            }
-        }
-    }
-    println!("Loaded {} rooms.", rooms.len());
-    Ok(rooms)
-}
-
 fn main() -> Result<()> {
     let config = config::app_config().run();
 
-    let rooms = load_rooms_from_smart(&config.input_dir)?;
+    let rooms = xml_types::load_project_rooms(&config.input_dir)?;
+    let areas = xml_types::load_project_area_maps(&config.input_dir)?;
 
     println!("Loading symbol map...");
     let symbols = SymbolMap::from_wla_sym(File::open(&config.vanilla_symbols_file)?)?;
@@ -761,6 +799,12 @@ fn main() -> Result<()> {
         let (room_id, room) = RoomHeader::from_xml(&mut rom_data, &xml_room, room_name)?;
         rom_data.rooms.insert(room_id, room);
     }
+    for (area_index, xml_area) in areas {
+        println!("Processing area {area_index}...");
+        let area = AreaMap::from_xml(xml_area)?;
+        *get_or_insert_default(&mut rom_data.area_maps, area_index.into()) = Some(area);
+    }
+
     println!("Processing templates...");
     emit_asm(&config, Arc::new(rom_data), Arc::new(symbols))?;
 

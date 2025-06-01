@@ -1,0 +1,31 @@
+; Area Maps
+
+AreaMapPointers:
+{% for area in data.area_maps %}
+    dl {{ "MapTilemaps_Area"~loop.index0 if area else "$000000" }}
+{% endfor %}
+
+AreaLabelTilemaps_pointers:
+{% for area in data.area_maps %}
+    dw {{ "AreaLabelTilemaps_Area"~loop.index0 if area else "$0000" }}
+{% endfor %}
+{% for area in data.area_maps %}
+{% if area %}
+AreaLabelTilemaps_Area{{ loop.index0 }}:
+    dw {{ area.title_tilemap | h16 }}
+{% endif %}
+{% endfor %}
+
+MapData_pointers:
+{% for area in data.area_maps %}
+    dw {{ "MapData_Area"~loop.index0 if area else "$0000" }}
+{% endfor %}
+{% for area in data.area_maps %}
+{% if area %}
+
+MapData_Area{{ loop.index0 }}:
+{% for line in area.revealed_tiles_bitmask | batch(4) %}
+    db {{ line | h8 }}
+{% endfor %}
+{% endif %}
+{% endfor %}

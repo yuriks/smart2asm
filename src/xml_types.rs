@@ -1,8 +1,14 @@
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
+use anyhow::{Context, Result, anyhow};
 use quick_xml::impl_deserialize_for_internally_tagged_enum;
 use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Deserializer};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::fs;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 use std::str::FromStr;
 
 macro_rules! make_list_unwrapper {
@@ -449,6 +455,112 @@ pub struct Room {
     pub doors: Vec<DoorEntry>,
     #[serde(rename = "States", deserialize_with = "unwrap_room_state_list")]
     pub states: Vec<RoomState>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "UPPERCASE")]
+pub struct Label {
+    pub x: HexU16,
+    pub y: HexU16,
+    pub gfx: HexU16,
+}
+make_list_unwrapper!(unwrap_label_list, Vec<Label>, "Label");
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "UPPERCASE")]
+pub struct Icon {
+    pub x: HexU16,
+    pub y: HexU16,
+}
+make_list_unwrapper!(unwrap_icon_list, Vec<Icon>, "Icon");
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct Map {
+    #[serde(deserialize_with = "split_xml_whitespace")]
+    pub tile_data: Vec<HexU16>,
+    #[serde(deserialize_with = "split_xml_whitespace")]
+    pub area_name: Vec<HexU16>,
+    #[serde(deserialize_with = "split_xml_whitespace")]
+    pub map_station_data: Vec<HexU8>,
+
+    #[serde(deserialize_with = "unwrap_label_list")]
+    pub area_labels: Vec<Label>,
+    #[serde(deserialize_with = "unwrap_icon_list")]
+    pub boss_icons: Vec<Icon>,
+    #[serde(deserialize_with = "unwrap_icon_list")]
+    pub missile_icons: Vec<Icon>,
+    #[serde(deserialize_with = "unwrap_icon_list")]
+    pub energy_icons: Vec<Icon>,
+    #[serde(deserialize_with = "unwrap_icon_list")]
+    pub map_icons: Vec<Icon>,
+    #[serde(deserialize_with = "unwrap_icon_list")]
+    pub save_icons: Vec<Icon>,
+}
+
+fn read_xml_file<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    println!("Parsing {}...", path.display());
+    let file = BufReader::new(File::open(path)?);
+    let parsed = quick_xml::de::from_reader(file)?;
+    Ok(parsed)
+}
+
+pub fn load_project_rooms(project_path: &Path) -> Result<BTreeMap<(HexU8, HexU8), (String, Room)>> {
+    use heck::ToUpperCamelCase;
+    use std::collections::btree_map::Entry;
+
+    let mut rooms = BTreeMap::new();
+
+    for entry in glob::glob(
+        project_path
+            .join("Export/Rooms/*.xml")
+            .to_str()
+            .context("input path is not valid UTF-8")?,
+    )? {
+        let path = match entry {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("Failed to read path: {e}");
+                continue;
+            }
+        };
+
+        let room_name = path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_upper_camel_case();
+        let room: Room = read_xml_file(&path)?;
+
+        match rooms.entry((room.area, room.index)) {
+            Entry::Vacant(e) => {
+                e.insert((room_name, room));
+            }
+            Entry::Occupied(e) => {
+                let (area_index, room_index) = e.key();
+                let old_name = &e.get().0;
+                return Err(anyhow!(
+                    "Duplicate rooms with id ({area_index},{room_index}): \"{old_name}\" and \"{room_name}\""
+                ));
+            }
+        }
+    }
+    println!("Loaded {} rooms.", rooms.len());
+    Ok(rooms)
+}
+
+pub fn load_project_area_maps(project_path: &Path) -> Result<BTreeMap<u8, Map>> {
+    let mut maps = BTreeMap::new();
+
+    for area_id in 0..8 {
+        let path = project_path.join(format!("Export/Maps/areamap.{area_id}.xml"));
+        if fs::exists(&path)? {
+            let map = read_xml_file(&path)?;
+            maps.insert(area_id, map);
+        }
+    }
+
+    Ok(maps)
 }
 
 #[cfg(test)]
