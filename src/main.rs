@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr, ValueKind};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::fmt::{Display, Write};
@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
+use xxhash_rust::xxh3;
 
 mod asm;
 mod config;
@@ -566,7 +567,8 @@ impl_rom_data_handle!(doorcode_raw: Vec<CodeInstruction>);
 #[derive(Debug)]
 struct TemplateInternalState {
     rom_data: Arc<RomData>,
-    compression_queue: Mutex<Vec<PathBuf>>,
+    compression_queue: Mutex<Vec<String>>,
+    metadata: Mutex<Metadata>,
     out_dir: PathBuf,
 }
 
@@ -599,28 +601,21 @@ fn write_file_filter(
             .with_source(e)
     })?;
 
-    if let Some(true) = kwargs.get("compress")? {
-        let compressed_path = {
-            let mut s = full_path.clone().into_os_string();
-            s.push(".lz5");
-            PathBuf::from(s)
-        };
-
-        let changed = write_file_if_not_matching(&full_path, &data).map_err(|e| {
+    let changed = write_file_if_not_matching(&full_path, &path, &data, &internal_state.metadata)
+        .map_err(|e| {
             minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file").with_source(e)
         })?;
-        if changed || !compressed_path.exists() {
+
+    if let Some(true) = kwargs.get("compress")? {
+        let compressed_path = path.clone() + ".lz5";
+        if changed || !internal_state.out_dir.join(&compressed_path).exists() {
             internal_state
                 .compression_queue
-                .lock()
-                .unwrap()
-                .push(full_path);
+                .lock_unpoisoned()
+                .push(path);
         }
-        Ok(path + ".lz5")
+        Ok(compressed_path)
     } else {
-        fs::write(full_path, &data).map_err(|e| {
-            minijinja::Error::new(ErrorKind::WriteFailure, "failed to write file").with_source(e)
-        })?;
         Ok(path)
     }
 }
@@ -690,11 +685,12 @@ fn hex24_filter(value: &Value) -> Result<String, minijinja::Error> {
 }
 
 fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>) -> Result<()> {
-    let rom_data = rom_data_arc.as_ref();
+    let metadata = load_metadata(&config.output_dir)?.unwrap_or_default();
 
     let internal_state = Arc::new(TemplateInternalState {
         rom_data: rom_data_arc.clone(),
         compression_queue: Default::default(),
+        metadata: metadata.into(),
         out_dir: config.output_dir.clone(),
     });
 
@@ -715,7 +711,7 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
 
-    let template_context = context!(data => rom_data);
+    let template_context = context!(data => rom_data_arc.as_ref());
     for glob_entry in glob::glob(
         config
             .templates_dir
@@ -732,45 +728,84 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
 
         let fname = template_name.strip_suffix(".j2").expect("`.j2` suffix");
         let output_path = config.output_dir.join(fname);
-        println!("Generating {}", output_path.display());
+        println!("Generating {fname}");
         let mut f = BufWriter::new(File::create(output_path)?);
         template.render_to_write(&template_context, &mut f)?;
     }
 
+    drop(env);
+    let internal_state = Arc::into_inner(internal_state).unwrap();
+
     // TODO: Parallelize
-    for f in internal_state.compression_queue.lock_unpoisoned().drain(..) {
-        println!("Compressing {}...", f.display());
+    for f in internal_state
+        .compression_queue
+        .into_inner_unpoisoned()
+        .into_iter()
+    {
+        println!("Compressing {f}...");
         compress_lz5_file(config, &f)?;
     }
+
+    let new_metadata = toml::to_string(&internal_state.metadata.into_inner_unpoisoned())?;
+    fs::write(config.output_dir.join(METADATA_FILENAME), new_metadata)?;
+
     Ok(())
 }
 
-fn write_file_if_not_matching(path: &Path, data: &[u8]) -> Result<bool, io::Error> {
-    let update_needed = if let Ok(existing_data) = fs::read(path) {
-        let mut hasher = DefaultHasher::new();
-        existing_data.hash(&mut hasher);
-        let existing_hash = hasher.finish();
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(transparent)]
+struct FileHash(#[serde(with = "util::serde_u128_as_hex")] u128);
 
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        let new_hash = hasher.finish();
-
-        new_hash != existing_hash
-    } else {
-        true
-    };
-
-    if update_needed {
-        fs::write(path, data)?;
-    }
-    Ok(update_needed)
+#[derive(Serialize, Deserialize, Default, Debug)]
+struct Metadata {
+    file_hashes: BTreeMap<String, FileHash>,
 }
 
-fn compress_lz5_file(config: &AppConfig, path: &Path) -> Result<()> {
+const METADATA_FILENAME: &'static str = "metadata.toml";
+
+fn load_metadata(output_path: &Path) -> Result<Option<Metadata>> {
+    let metadata_path = output_path.join(METADATA_FILENAME);
+    let file_contents = match fs::read_to_string(metadata_path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("Failed to read metadata.toml"),
+    };
+
+    toml::from_str(&file_contents).context("Failed to parse metadata.toml")
+}
+
+fn write_file_if_not_matching(
+    full_path: &Path,
+    metadata_path: &str,
+    data: &Vec<u8>,
+    metadata: &Mutex<Metadata>,
+) -> Result<bool, io::Error> {
+    let hash = FileHash(xxh3::xxh3_128(&data));
+    let changed = !full_path.exists() || {
+        let metadata = metadata.lock_unpoisoned();
+        let old_hash = metadata.file_hashes.get(metadata_path);
+        old_hash.map_or(true, |h| *h != hash)
+    };
+
+    if changed {
+        fs::write(full_path, &data)?;
+
+        let mut metadata = metadata.lock_unpoisoned();
+        if let Some(old_hash) = metadata.file_hashes.get_mut(metadata_path) {
+            *old_hash = hash;
+        } else {
+            metadata.file_hashes.insert(metadata_path.to_owned(), hash);
+        }
+    }
+
+    Ok(changed)
+}
+
+fn compress_lz5_file(config: &AppConfig, path: &str) -> Result<()> {
     let status = Command::new(&config.compressor_path)
         .arg("-c") // Compress
         .arg("-f") // Input file
-        .arg(path)
+        .arg(config.output_dir.join(path))
         .status()?;
     if status.success() {
         Ok(())
@@ -800,7 +835,7 @@ fn main() -> Result<()> {
         *get_or_insert_default(&mut rom_data.area_maps, area_index.into()) = Some(area);
     }
 
-    println!("Processing templates...");
+    println!("Writing output to {:?}...", config.output_dir);
     emit_asm(&config, Arc::new(rom_data), Arc::new(symbols))?;
 
     Ok(())
