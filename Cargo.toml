@@ -15,3 +15,6 @@ bpaf = { version = "0.9.19", features = ["derive", "dull-color"] }
 toml = "0.8.22"
 hex = { version = "0.4.3", features = ["serde"]}
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+indicatif = "0.17.11"

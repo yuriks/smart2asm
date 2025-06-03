@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::str::FromStr;
+use tracing::{debug, error, info};
 
 macro_rules! make_list_unwrapper {
     ($fn_name:ident, $type:ty, $el_name:literal) => {
@@ -498,13 +499,15 @@ pub struct Map {
     pub save_icons: Vec<Icon>,
 }
 
+#[tracing::instrument]
 fn read_xml_file<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    println!("Parsing {}...", path.display());
+    debug!("parsing file");
     let file = BufReader::new(File::open(path)?);
     let parsed = quick_xml::de::from_reader(file)?;
     Ok(parsed)
 }
 
+#[tracing::instrument]
 pub fn load_project_rooms(project_path: &Path) -> Result<BTreeMap<(HexU8, HexU8), (String, Room)>> {
     use heck::ToUpperCamelCase;
     use std::collections::btree_map::Entry;
@@ -519,8 +522,8 @@ pub fn load_project_rooms(project_path: &Path) -> Result<BTreeMap<(HexU8, HexU8)
     )? {
         let path = match entry {
             Ok(path) => path,
-            Err(e) => {
-                eprintln!("Failed to read path: {e}");
+            Err(err) => {
+                error!(?err, "failed to read glob path");
                 continue;
             }
         };
@@ -545,10 +548,11 @@ pub fn load_project_rooms(project_path: &Path) -> Result<BTreeMap<(HexU8, HexU8)
             }
         }
     }
-    println!("Loaded {} rooms.", rooms.len());
+    info!("Loaded {} rooms from SMART", rooms.len());
     Ok(rooms)
 }
 
+#[tracing::instrument]
 pub fn load_project_area_maps(project_path: &Path) -> Result<BTreeMap<u8, Map>> {
     let mut maps = BTreeMap::new();
 

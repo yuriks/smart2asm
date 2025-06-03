@@ -1,12 +1,17 @@
 use crate::hex_types::{HexU16, HexU24};
+use crate::ui;
 use anyhow::{Result, anyhow};
+use indicatif::ProgressBar;
 use minijinja::value::{Object, ViaDeserialize};
 use minijinja::{Error, State, Value, value};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{BufRead, BufReader, Read};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek};
+use std::path::Path;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 pub enum LookupResult<'a, T> {
     Label(&'a str),
@@ -41,7 +46,16 @@ impl SymbolMap {
         SymbolMap { addr_to_label }
     }
 
-    pub fn from_wla_sym(f: impl Read) -> Result<SymbolMap> {
+    #[tracing::instrument]
+    pub fn from_wla_sym_file(path: &Path) -> Result<SymbolMap> {
+        Self::from_wla_sym(File::open(path)?)
+    }
+
+    pub fn from_wla_sym(f: impl Read + Seek) -> Result<SymbolMap> {
+        let pb = ui::add_progress_bar(ProgressBar::no_length());
+        pb.set_style(ui::STYLE_MSG_ITEMS.clone());
+        pb.set_message("Loading symbols");
+
         let bf = BufReader::new(f);
         let mut lines = bf.lines();
 
@@ -75,11 +89,11 @@ impl SymbolMap {
             }
 
             let Some((addr_part, label_part)) = l.split_once(' ') else {
-                eprintln!("Malformed line, skipping: {full_line}");
+                warn!(full_line, "malformed line, skipping");
                 continue;
             };
             let Some((bank_part, word_addr_part)) = addr_part.split_once(':') else {
-                eprintln!("Malformed line, skipping: {full_line}");
+                warn!(full_line, "malformed line, skipping");
                 continue;
             };
             let bank = u8::from_str_radix(bank_part, 16)?;
@@ -88,8 +102,15 @@ impl SymbolMap {
             let full_addr = (bank as u32) << 16 | word_addr as u32;
 
             addr_to_label.insert(full_addr, label_part.to_string());
+            if addr_to_label.len() % 16 == 0 {
+                pb.set_position(addr_to_label.len().try_into().unwrap_or(0));
+            }
         }
 
+        pb.set_position(addr_to_label.len().try_into().unwrap_or(0));
+        pb.finish_and_clear();
+
+        info!("Loaded {} symbols", addr_to_label.len());
         Ok(SymbolMap::new(addr_to_label))
     }
 

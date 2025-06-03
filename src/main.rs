@@ -3,6 +3,7 @@ use crate::config::AppConfig;
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::util::IgnoreMutexPoison;
 use anyhow::{Context, Result, anyhow};
+use indicatif::ProgressBar;
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr, ValueKind};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
@@ -18,11 +19,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
+use tracing::{debug, info_span};
 use xxhash_rust::xxh3;
 
 mod asm;
 mod config;
 mod hex_types;
+mod ui;
 mod util;
 mod xml_conversion;
 mod xml_types;
@@ -724,11 +727,13 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
         let template_name = template_fname
             .to_str()
             .with_context(|| format!("template {template_fname:?} has non-UTF-8 name"))?;
+
+        let _span = info_span!("generate_templated_asm", template_name).entered();
         let template = env.get_template(template_name)?;
 
         let fname = template_name.strip_suffix(".j2").expect("`.j2` suffix");
         let output_path = config.output_dir.join(fname);
-        println!("Generating {fname}");
+        debug!("writing assembly");
         let mut f = BufWriter::new(File::create(output_path)?);
         template.render_to_write(&template_context, &mut f)?;
     }
@@ -737,14 +742,22 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     let internal_state = Arc::into_inner(internal_state).unwrap();
 
     // TODO: Parallelize
-    for f in internal_state
-        .compression_queue
-        .into_inner_unpoisoned()
-        .into_iter()
-    {
-        println!("Compressing {f}...");
+    let pb =
+        ui::add_progress_bar(ProgressBar::no_length()).with_style(ui::STYLE_MSG_PROGRESS.clone());
+    for f in {
+        let iter = internal_state
+            .compression_queue
+            .into_inner_unpoisoned()
+            .into_iter();
+        pb.set_length(iter.len().try_into().unwrap_or_default());
+        iter
+    } {
+        pb.set_message(format!("Compressing {f}..."));
+        pb.inc(1);
+        debug!(input_file = f, "compressing");
         compress_lz5_file(config, &f)?;
     }
+    pb.finish_and_clear();
 
     let new_metadata = toml::to_string(&internal_state.metadata.into_inner_unpoisoned())?;
     fs::write(config.output_dir.join(METADATA_FILENAME), new_metadata)?;
@@ -814,28 +827,48 @@ fn compress_lz5_file(config: &AppConfig, path: &str) -> Result<()> {
     }
 }
 
+fn configure_tracing() {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_writer(ui::IndicatifStdoutWriter::new),
+        )
+        .with(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
+}
+
 fn main() -> Result<()> {
     let config = config::app_config().run();
+    ui::init_console();
+    configure_tracing();
 
     let rooms = xml_types::load_project_rooms(&config.input_dir)?;
     let areas = xml_types::load_project_area_maps(&config.input_dir)?;
 
-    println!("Loading symbol map...");
-    let symbols = SymbolMap::from_wla_sym(File::open(&config.vanilla_symbols_file)?)?;
+    let symbols = SymbolMap::from_wla_sym_file(&config.vanilla_symbols_file)?;
 
     let mut rom_data = RomData::default();
     for ((area_index, room_index), (room_name, xml_room)) in rooms {
-        println!("Processing room ({area_index},{room_index}) {room_name}...");
+        debug!(%area_index, %room_index, room_name, "processing room");
         let (room_id, room) = RoomHeader::from_xml(&mut rom_data, &xml_room, room_name)?;
         rom_data.rooms.insert(room_id, room);
     }
     for (area_index, xml_area) in areas {
-        println!("Processing area {area_index}...");
+        debug!(%area_index, "processing area map");
         let area = AreaMap::from_xml(xml_area)?;
         *get_or_insert_default(&mut rom_data.area_maps, area_index.into()) = Some(area);
     }
 
-    println!("Writing output to {:?}...", config.output_dir);
     emit_asm(&config, Arc::new(rom_data), Arc::new(symbols))?;
 
     Ok(())
