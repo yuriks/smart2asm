@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-quick-xml = { version = "0.37", features = ["serialize", "serde-types"] }
-glob = "0.3"
 anyhow = "1.0"
-heck = "0.5"
-bytemuck = { version = "1.21", features = ["min_const_generics", "extern_crate_alloc", "derive"] }
-minijinja = { version = "2.10", features = ["loader"] }
 bpaf = { version = "0.9.19", features = ["derive", "dull-color"] }
-toml = "0.8.22"
+bytemuck = { version = "1.21", features = ["min_const_generics", "extern_crate_alloc", "derive"] }
+glob = "0.3"
+heck = "0.5"
 hex = { version = "0.4.3", features = ["serde"]}
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+indicatif = "0.17.11"
+minijinja = { version = "2.10", features = ["loader"] }
+quick-xml = { version = "0.37", features = ["serialize", "serde-types"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8.22"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-indicatif = "0.17.11"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
