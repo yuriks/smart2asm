@@ -4,37 +4,12 @@ use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use minijinja::value::{Object, ViaDeserialize};
 use minijinja::{Error, State, Value, value};
-use serde::Serialize;
 use std::collections::HashMap;
-use std::fmt::{Debug, Display, Formatter};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
-
-pub enum LookupResult<'a, T> {
-    Label(&'a str),
-    NotFound(T),
-}
-
-impl<T: Display> Display for LookupResult<'_, T> {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        match self {
-            LookupResult::Label(l) => Display::fmt(l, f),
-            LookupResult::NotFound(v) => Display::fmt(v, f),
-        }
-    }
-}
-
-impl<T: Serialize + 'static> From<LookupResult<'_, T>> for Value {
-    fn from(value: LookupResult<T>) -> Value {
-        match value {
-            LookupResult::Label(l) => l.into(),
-            LookupResult::NotFound(a) => Value::from_serialize(a),
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct SymbolMap {
@@ -104,19 +79,13 @@ impl SymbolMap {
         Ok(SymbolMap::new(addr_to_label))
     }
 
-    pub fn resolve_label(&self, bank: u8, addr: HexU16) -> LookupResult<HexU16> {
+    pub fn resolve_label(&self, bank: u8, addr: HexU16) -> Option<&str> {
         let long_addr = (bank as u32) << 16 | addr.0 as u32;
-        match self.addr_to_label.get(&long_addr) {
-            Some(l) => LookupResult::Label(l),
-            None => LookupResult::NotFound(addr),
-        }
+        self.addr_to_label.get(&long_addr).map(String::as_str)
     }
 
-    pub fn resolve_label_long(&self, addr: HexU24) -> LookupResult<HexU24> {
-        match self.addr_to_label.get(&addr.0) {
-            Some(l) => LookupResult::Label(l),
-            None => LookupResult::NotFound(addr),
-        }
+    pub fn resolve_label_long(&self, addr: HexU24) -> Option<&str> {
+        self.addr_to_label.get(&addr.0).map(String::as_str)
     }
 }
 
@@ -141,11 +110,17 @@ impl Object for SymbolMap {
         match method {
             "resolve_label" => {
                 let (bank, ViaDeserialize(addr)) = value::from_args(args)?;
-                Ok(Value::from(self.resolve_label(bank, addr)))
+                Ok(match self.resolve_label(bank, addr) {
+                    Some(label) => label.into(),
+                    None => Value::from_serialize(addr),
+                })
             }
             "resolve_label_long" => {
                 let (ViaDeserialize(addr),) = value::from_args(args)?;
-                Ok(Value::from(self.resolve_label_long(addr)))
+                Ok(match self.resolve_label_long(addr) {
+                    Some(label) => label.into(),
+                    None => Value::from_serialize(addr),
+                })
             }
             _ => Err(Error::from(minijinja::ErrorKind::UnknownMethod)),
         }
