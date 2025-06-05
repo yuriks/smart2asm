@@ -1,6 +1,6 @@
 use crate::hex_types::{HexU16, HexU24};
 use crate::ui;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use minijinja::value::{Object, ViaDeserialize};
 use minijinja::{Error, State, Value, value};
@@ -69,10 +69,7 @@ impl SymbolMap {
         }
 
         let mut addr_to_label = HashMap::new();
-        loop {
-            let Some(full_line) = lines.next() else {
-                break;
-            };
+        for full_line in lines {
             let full_line = full_line?;
             // Start of new section
             if full_line.starts_with("[") {
@@ -80,28 +77,21 @@ impl SymbolMap {
             }
 
             // Strip comment and whitespace
-            let l: &str = full_line
+            let l = full_line
                 .split_once(';')
-                .map_or(&full_line, |(l, _comment)| l);
-            let l = l.trim_end();
+                .map_or(full_line.as_str(), |(l, _comment)| l)
+                .trim_end();
             if l.is_empty() {
                 continue;
             }
 
-            let Some((addr_part, label_part)) = l.split_once(' ') else {
+            let Ok((bank, word_addr, label)) = parse_label_line(l) else {
                 warn!(full_line, "malformed line, skipping");
                 continue;
             };
-            let Some((bank_part, word_addr_part)) = addr_part.split_once(':') else {
-                warn!(full_line, "malformed line, skipping");
-                continue;
-            };
-            let bank = u8::from_str_radix(bank_part, 16)?;
-            let word_addr = u16::from_str_radix(word_addr_part, 16)?;
 
             let full_addr = (bank as u32) << 16 | word_addr as u32;
-
-            addr_to_label.insert(full_addr, label_part.to_string());
+            addr_to_label.insert(full_addr, label.to_string());
             if addr_to_label.len() % 16 == 0 {
                 pb.set_position(addr_to_label.len().try_into().unwrap_or(0));
             }
@@ -128,6 +118,17 @@ impl SymbolMap {
             None => LookupResult::NotFound(addr),
         }
     }
+}
+
+/// Parses a debug label entry in the form: `BB:AAAA label`
+fn parse_label_line(l: &str) -> Result<(u8, u16, &str)> {
+    let (addr_part, label_part) = l.split_once(' ').context("malformed line")?;
+    let (bank_part, word_addr_part) = addr_part.split_once(':').context("malformed line")?;
+
+    let bank = u8::from_str_radix(bank_part, 16)?;
+    let word_addr = u16::from_str_radix(word_addr_part, 16)?;
+
+    Ok((bank, word_addr, label_part))
 }
 
 impl Object for SymbolMap {

@@ -774,7 +774,7 @@ struct Metadata {
     file_hashes: BTreeMap<String, FileHash>,
 }
 
-const METADATA_FILENAME: &'static str = "metadata.toml";
+const METADATA_FILENAME: &str = "metadata.toml";
 
 fn load_metadata(output_path: &Path) -> Result<Option<Metadata>> {
     let metadata_path = output_path.join(METADATA_FILENAME);
@@ -793,15 +793,15 @@ fn write_file_if_not_matching(
     data: &Vec<u8>,
     metadata: &Mutex<Metadata>,
 ) -> Result<bool, io::Error> {
-    let hash = FileHash(xxh3::xxh3_128(&data));
+    let hash = FileHash(xxh3::xxh3_128(data));
     let changed = !full_path.exists() || {
         let metadata = metadata.lock_unpoisoned();
         let old_hash = metadata.file_hashes.get(metadata_path);
-        old_hash.map_or(true, |h| *h != hash)
+        old_hash.is_none_or(|h| *h != hash)
     };
 
     if changed {
-        fs::write(full_path, &data)?;
+        fs::write(full_path, data)?;
 
         let mut metadata = metadata.lock_unpoisoned();
         if let Some(old_hash) = metadata.file_hashes.get_mut(metadata_path) {
