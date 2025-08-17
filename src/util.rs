@@ -2,14 +2,14 @@ use std::sync::{Mutex, MutexGuard};
 
 pub trait IgnoreMutexPoison<T> {
     /// Equivalent to `.lock().unwrap()`, for when handling poisoning is not needed.
-    fn lock_unpoisoned(&self) -> MutexGuard<T>;
+    fn lock_unpoisoned(&self) -> MutexGuard<'_, T>;
 
     /// Equivalent to `.into_inner().unwrap()`, for when handling poisoning is not needed.
     fn into_inner_unpoisoned(self) -> T;
 }
 
 impl<T> IgnoreMutexPoison<T> for Mutex<T> {
-    fn lock_unpoisoned(&self) -> MutexGuard<T> {
+    fn lock_unpoisoned(&self) -> MutexGuard<'_, T> {
         self.lock().expect("unpoisoned mutex")
     }
 
