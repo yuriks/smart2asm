@@ -516,6 +516,22 @@ struct AreaMap {
     save_icons: Vec<MapIcon>,
 }
 
+type TilesetId = u8;
+
+#[derive(Debug, Serialize)]
+struct Tileset {
+    tiles: OwningRef<TileData>,
+    tiletable: OwningRef<TileTable>,
+    palette: OwningRef<TilesetPalette>,
+}
+
+#[derive(Debug, Hash, Serialize)]
+struct TileData(Vec<u8>);
+#[derive(Debug, Hash, Serialize)]
+struct TileTable(Vec<u16>);
+#[derive(Debug, Hash, Serialize)]
+struct TilesetPalette(Vec<u16>);
+
 #[derive(Default, Debug, Serialize)]
 struct RomData {
     // Room-rooted data
@@ -538,6 +554,13 @@ struct RomData {
 
     // AreaMap-rooted data
     area_maps: Vec<Option<AreaMap>>,
+
+    // Tileset-rooted data
+    cre_tilesets: BTreeMap<TilesetId, Tileset>,
+    sce_tilesets: BTreeMap<TilesetId, Tileset>,
+    tileset_tiledata: DataDeduper<TileData>,
+    tileset_tiletables: DataDeduper<TileTable>,
+    tileset_palettes: DataDeduper<TilesetPalette>,
 }
 
 macro_rules! impl_rom_data_handle {
@@ -566,6 +589,9 @@ impl_rom_data_handle!(bgdata_commands: BgDataCommandList);
 impl_rom_data_handle!(bgdata_tile_data: (Vec<u8>, bool));
 // doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>
 impl_rom_data_handle!(doorcode_raw: Vec<CodeInstruction>);
+impl_rom_data_handle!(tileset_tiledata: TileData);
+impl_rom_data_handle!(tileset_tiletables: TileTable);
+impl_rom_data_handle!(tileset_palettes: TilesetPalette);
 
 #[derive(Debug)]
 struct TemplateInternalState {
@@ -854,6 +880,7 @@ fn main() -> Result<()> {
 
     let rooms = xml_types::load_project_rooms(&config.input_dir)?;
     let areas = xml_types::load_project_area_maps(&config.input_dir)?;
+    let tilesets = xml_types::load_project_tilesets(&config.input_dir)?;
 
     let symbols = SymbolMap::from_wla_sym_file(&config.vanilla_symbols_file)?;
 

@@ -5,12 +5,12 @@ use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Deserializer};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fs;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::str::FromStr;
-use tracing::{debug, error, info};
+use std::{fs, io};
+use tracing::{debug, error, info, warn};
 
 macro_rules! make_list_unwrapper {
     ($fn_name:ident, $type:ty, $el_name:literal) => {
@@ -499,6 +499,17 @@ pub struct Map {
     pub save_icons: Vec<Icon>,
 }
 
+pub struct Tileset {
+    gfx: Vec<u8>,
+    tiletable: Vec<u16>,
+    palette: Vec<u16>, // Empty for CRE
+}
+
+pub struct TilesetsInfo {
+    pub cre: BTreeMap<u8, Tileset>,
+    pub sce: BTreeMap<u8, Tileset>,
+}
+
 #[tracing::instrument]
 fn read_xml_file<T: DeserializeOwned>(path: &Path) -> Result<T> {
     debug!("parsing file");
@@ -565,6 +576,85 @@ pub fn load_project_area_maps(project_path: &Path) -> Result<BTreeMap<u8, Map>> 
     }
 
     Ok(maps)
+}
+
+#[tracing::instrument]
+pub fn load_project_tilesets(project_path: &Path) -> Result<TilesetsInfo> {
+    Ok(TilesetsInfo {
+        cre: load_tilesets_from_dir(&project_path.join("Export/Tileset/CRE"))?,
+        sce: load_tilesets_from_dir(&project_path.join("Export/Tileset/SCE"))?,
+    })
+}
+
+fn rgb_to_snes([r, g, b]: [u8; 3]) -> u16 {
+    if (r | g | b) & 0b111 != 0 {
+        warn!("excessive color precision in palette entry discarded: #{r:02X}{g:02X}{b:02X}");
+    }
+    (r as u16 >> 3) | (g as u16 >> 3 << 5) | (b as u16 >> 3 << 10)
+}
+
+fn rgb_palette_to_snes(contents: &[u8]) -> Vec<u16> {
+    let (entries, _) = contents.as_chunks::<3>();
+    entries.iter().copied().map(rgb_to_snes).collect()
+}
+
+fn detect_and_load_palette(base_filepath: &Path) -> Result<Vec<u16>> {
+    let try_extensions = |exts: &[&str]| {
+        for ext in exts {
+            match fs::read(base_filepath.with_extension(ext)) {
+                Ok(c) => return Ok(Some(c)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(None)
+    };
+
+    // try TPL, PAL, (RAW, SNES, BIN)
+    if let Some(contents) = try_extensions(&["tpl"])? {
+        let Some((header, entries)) = contents.split_at_checked(4) else {
+            return Err(anyhow!("Invalid TPL file: missing header"));
+        };
+        if &header[0..3] != b"TPL" {
+            return Err(anyhow!("Invalid TPL file: wrong magic"));
+        }
+        match header[3] {
+            0 => Ok(rgb_palette_to_snes(entries)),         // RGB format
+            2 => Ok(bytemuck::cast_slice(entries).into()), // SNES format
+            _ => Err(anyhow!("Invalid TPL file: unsupported format")),
+        }
+    } else if let Some(contents) = try_extensions(&["pal"])? {
+        Ok(rgb_palette_to_snes(&contents))
+    } else if let Some(contents) = try_extensions(&["raw", "snes", "bin"])? {
+        Ok(bytemuck::cast_vec(contents))
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn load_tilesets_from_dir(path: &Path) -> Result<BTreeMap<u8, Tileset>> {
+    let mut tilesets = BTreeMap::new();
+    for e in path.read_dir()? {
+        let file_name = e?.file_name();
+        let Ok(HexU8(tileset_id)) = HexU8::from_str(&file_name.to_string_lossy()) else {
+            continue;
+        };
+
+        let tileset_path = path.join(file_name);
+        let gfx_data = fs::read(tileset_path.join("8x8tiles.gfx"))?;
+        let ttb_data = fs::read(tileset_path.join("16x16tiles.ttb"))?;
+        let palette_data = detect_and_load_palette(&tileset_path.join("palette"))?;
+
+        tilesets.insert(
+            tileset_id,
+            Tileset {
+                gfx: gfx_data,
+                tiletable: bytemuck::cast_vec(ttb_data),
+                palette: palette_data,
+            },
+        );
+    }
+    Ok(tilesets)
 }
 
 #[cfg(test)]
