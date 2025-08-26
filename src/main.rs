@@ -293,7 +293,12 @@ fn get_or_insert_default<T: Default>(vec: &mut Vec<T>, i: usize) -> &mut T {
     &mut vec[i]
 }
 
-type DoorId = (RoomId, u8 /* exit index */); // Unlike RoomHeaders, multiple ids can represent the same DoorHeader
+// Unlike RoomHeaders, multiple ids can represent the same DoorHeader
+#[derive(Copy, Clone, Debug, Hash, Serialize)]
+struct DoorId {
+    room: RoomId,
+    exit: u8,
+}
 
 #[derive(Debug, Hash, Serialize)]
 #[serde(tag = "type")]

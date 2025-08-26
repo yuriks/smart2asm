@@ -1,8 +1,8 @@
 use crate::hex_types::{HexU8, HexU16, HexU24};
 use crate::{
     AreaMap, BgDataCommand, BgDataSource, CodeInstruction, CopyCommandParams, DoorAsmType,
-    DoorHeader, EnemyGfxSet, EnemyGfxSetEntry, EnemyPopulation, EnemyPopulationEntry, ExitType,
-    FxHeader, FxHeaderEntry, LoadStation, MapIcon, MapLabel, PlmParam, PlmPopulation,
+    DoorHeader, DoorId, EnemyGfxSet, EnemyGfxSetEntry, EnemyPopulation, EnemyPopulationEntry,
+    ExitType, FxHeader, FxHeaderEntry, LoadStation, MapIcon, MapLabel, PlmParam, PlmPopulation,
     PlmPopulationEntry, RomData, RoomHeader, RoomId, RoomState, ScrollDataChange, ScrollDataKind,
     TILES_PER_SCREEN, xml_types,
 };
@@ -311,13 +311,13 @@ impl FxHeaderEntry {
             .map(|(i, fx)| {
                 let from_door = match (fx.default, fx.roomarea, fx.roomindex, fx.fromdoor) {
                     (true, None, None, None) => None,
-                    (false, Some(area), Some(index), Some(door)) => Some((
-                        RoomId {
+                    (false, Some(area), Some(index), Some(door)) => Some(DoorId {
+                        room: RoomId {
                             area: area.0,
                             room: index.0,
                         },
-                        door.0,
-                    )),
+                        exit: door.0,
+                    }),
                     _ => {
                         return Err(anyhow!(
                             "Fx1 `default` and door reference are mutually exclusive"
@@ -554,13 +554,13 @@ impl LoadStation {
         xml: &xml_types::SaveRoom,
         room_id: RoomId,
     ) -> Result<(HexU8, LoadStation)> {
-        let from_door = (
-            RoomId {
+        let from_door = DoorId {
+            room: RoomId {
                 area: xml.indoor.room_area.0,
                 room: xml.indoor.room_index.0,
             },
-            xml.indoor.door_index.0,
-        );
+            exit: xml.indoor.door_index.0,
+        };
         Ok((
             xml.saveindex,
             LoadStation {

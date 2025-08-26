@@ -10,7 +10,7 @@ LoadStations_Area{{ loop.index0 }}:
 {% for station in area %}
 {% if station %}
     ; Station {{ loop.index0 | hex8 }}
-    {% set from_door_ref = station.from_door[0]().exits[station.from_door[1]] %}
+    {% set from_door_ref = station.from_door.room().exits[station.from_door.exit] %}
     dw RoomHeader_{{ station.room().name }}, {{ from_door_ref }}
     {# samus_y comes before samus_x for some reason #}
     dw {{ station.unused }},{{ station.screen_x }},{{ station.screen_y }},{{ station.samus_y }},{{ station.samus_x }}
