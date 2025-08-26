@@ -649,12 +649,16 @@ fn load_tilesets_from_dir(path: &Path) -> Result<BTreeMap<u8, Tileset>> {
             tileset_id,
             Tileset {
                 gfx: gfx_data,
-                tiletable: bytemuck::cast_vec(ttb_data),
+                tiletable: reinterpret_vec(ttb_data),
                 palette: palette_data,
             },
         );
     }
     Ok(tilesets)
+}
+
+fn reinterpret_vec<T: bytemuck::Pod, U: bytemuck::Pod>(v: Vec<T>) -> Vec<U> {
+    bytemuck::try_cast_vec(v).unwrap_or_else(|(_, v)| bytemuck::pod_collect_to_vec(&v))
 }
 
 #[cfg(test)]
