@@ -4,7 +4,7 @@ use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::util::IgnoreMutexPoison;
 use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
-use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr, ValueKind};
+use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr, ValueKind};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
-use tracing::{debug, info_span};
+use tracing::{debug, error, info_span};
 use xxhash_rust::xxh3;
 
 mod asm;
@@ -30,13 +30,7 @@ mod util;
 mod xml_conversion;
 mod xml_types;
 
-#[derive(Debug)]
-struct DeduperEntry<T> {
-    data: T,
-    labels: Vec<String>,
-    refcount: u32,
-}
-
+#[derive(Deserialize)]
 struct OwningRef<T> {
     idx: usize,
     label: String,
@@ -92,30 +86,7 @@ where
     }
 }
 
-trait RomDataHandle {
-    type Target;
-
-    fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target>;
-}
-
-fn deref_handle_to_value<T: RomDataHandle<Target: Serialize>>(
-    handle: &Arc<T>,
-    state: &State,
-    args: &[Value],
-) -> Result<Value, minijinja::Error> {
-    let () = value::from_args(args)?;
-    let internal_state = get_internal_state(state)?;
-    let object = handle
-        .resolve(&internal_state.rom_data)
-        .ok_or(ErrorKind::UndefinedError)?;
-    Ok(Value::from_serialize(object))
-}
-
-impl<T> Object for OwningRef<T>
-where
-    Self: RomDataHandle,
-    <Self as RomDataHandle>::Target: Serialize,
-{
+impl<T> Object for OwningRef<T> {
     fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
         match key.as_str()? {
             "label" => Some(Value::from(self.label())),
@@ -127,10 +98,6 @@ where
         Enumerator::Str(&["label"])
     }
 
-    fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
-        deref_handle_to_value(self, state, args)
-    }
-
     fn render(self: &Arc<Self>, f: &mut Formatter) -> std::fmt::Result
     where
         Self: Sized + 'static,
@@ -139,7 +106,14 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+struct DeduperEntry<T> {
+    data: T,
+    labels: Vec<String>,
+    refcount: u32,
+}
+
+#[derive(Clone, Debug)]
 struct DataDeduper<T> {
     entries: Vec<DeduperEntry<T>>,
     hash_to_id: HashMap<u64, usize>,
@@ -192,16 +166,46 @@ impl<T> DataDeduper<T> {
     }
 }
 
-impl<T: Serialize> Serialize for DataDeduper<T> {
+impl<T: Clone + Debug + Send + Sync + Serialize + Hash + 'static> Serialize for DataDeduper<T> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
+        if value::serializing_for_value() {
+            return Value::from_object(self.clone()).serialize(serializer);
+        }
         let mut seq = serializer.serialize_seq(Some(self.entries().len()))?;
         for e in self.entries() {
             seq.serialize_element(&(&e.labels, &e.data))?;
         }
         seq.end()
+    }
+}
+
+impl<T: Debug + Send + Sync + Serialize + Hash + 'static> Object for DataDeduper<T> {
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        let handle = match OwningRef::<T>::deserialize(key) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Trying to index with invalid key `{key:?}`: {e:?}");
+                return None;
+            }
+        };
+        Some(Value::from_serialize(&self.get(&handle)?.data))
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        self.mapped_enumerator(|this| {
+            Box::new(
+                this.entries()
+                    .iter()
+                    .map(|e| Value::from_serialize((&e.labels, &e.data))),
+            )
+        })
+    }
+
+    fn enumerator_len(self: &Arc<Self>) -> Option<usize> {
+        Some(self.entries().len())
     }
 }
 
@@ -217,14 +221,6 @@ impl Debug for RoomId {
             .field("area", &HexU8(self.area))
             .field("room", &HexU8(self.room))
             .finish()
-    }
-}
-
-impl RomDataHandle for RoomId {
-    type Target = RoomHeader;
-
-    fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target> {
-        data.rooms.get(self)
     }
 }
 
@@ -257,10 +253,6 @@ impl Object for RoomId {
 
     fn enumerate(self: &Arc<Self>) -> Enumerator {
         Enumerator::Str(&["area", "room"])
-    }
-
-    fn call(self: &Arc<Self>, state: &State, args: &[Value]) -> Result<Value, minijinja::Error> {
-        deref_handle_to_value(self, state, args)
     }
 }
 
@@ -300,14 +292,14 @@ struct DoorId {
     exit: u8,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 #[serde(tag = "type")]
 enum ExitType {
     Elevator,
     Door(DoorHeader),
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct DoorHeader {
     destination: RoomId,
     transition_flags: HexU8, // 0x80 = elevator destination, 0x40 = area change
@@ -326,14 +318,14 @@ struct ScrollDataChange {
     screen_index: HexU8,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 enum DoorAsmType {
     Address(HexU16), // label
     ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
     DoorCode(OwningRef<Vec<CodeInstruction>>),
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct CodeInstruction {
     op: HexU8,
     arg: Option<HexValue>,
@@ -343,7 +335,7 @@ fn count_true<const N: usize>(conds: [bool; N]) -> usize {
     conds.into_iter().filter(|&b| b).count()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct RoomState {
     // Not part of header
     condition_test: HexU16,          // label
@@ -375,7 +367,7 @@ const TILES_PER_SCREEN: usize = 16 * 16;
 
 type FxHeader = Vec<FxHeaderEntry>;
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct FxHeaderEntry {
     from_door: Option<DoorId>,
     liquid_y_start: HexU16,
@@ -391,13 +383,13 @@ struct FxHeaderEntry {
     palette_blend_index: HexU8,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct EnemyPopulation {
     entries: Vec<EnemyPopulationEntry>,
     kills_required: HexU8,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct EnemyPopulationEntry {
     enemy_header: HexU16, // label
     pos_x: HexU16,
@@ -411,7 +403,7 @@ struct EnemyPopulationEntry {
 
 type EnemyGfxSet = Vec<EnemyGfxSetEntry>;
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct EnemyGfxSetEntry {
     enemy_header: HexU16, // label
     palette_index_and_flags: HexU16,
@@ -419,7 +411,7 @@ struct EnemyGfxSetEntry {
 
 type ScrollData = Vec<HexU8>;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 enum ScrollDataKind {
     /// Stores fixed scroll value minus one. (0 = $01, 1 = $02)
     Fixed(HexU16),
@@ -428,7 +420,7 @@ enum ScrollDataKind {
 
 type PlmPopulation = Vec<PlmPopulationEntry>;
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct PlmPopulationEntry {
     plm_header: HexU16, // label
     pos_x: HexU8,
@@ -436,7 +428,7 @@ struct PlmPopulationEntry {
     param: PlmParam,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 enum PlmParam {
     Value(HexU16),
     ScrollDataUpdate(OwningRef<Vec<ScrollDataChange>>),
@@ -444,7 +436,7 @@ enum PlmParam {
 
 type BgDataCommandList = Vec<BgDataCommand>;
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 #[serde(tag = "type")]
 enum BgDataCommand {
     CopyToVram(CopyCommandParams), // Command $2
@@ -466,14 +458,14 @@ enum BgDataCommand {
     },
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct CopyCommandParams {
     source: BgDataSource,
     dest: HexU16, // VRAM address
     size: HexU16,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 enum BgDataSource {
     Label(HexU24),
     Ref(OwningRef<(Vec<u8>, bool)>),
@@ -530,11 +522,11 @@ struct Tileset {
     palette: OwningRef<TilesetPalette>,
 }
 
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct TileData(Vec<u8>);
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct TileTable(Vec<u16>);
-#[derive(Debug, Hash, Serialize)]
+#[derive(Clone, Debug, Hash, Serialize)]
 struct TilesetPalette(Vec<u16>);
 
 #[derive(Default, Debug, Serialize)]
@@ -567,36 +559,6 @@ struct RomData {
     tileset_tiletables: DataDeduper<TileTable>,
     tileset_palettes: DataDeduper<TilesetPalette>,
 }
-
-macro_rules! impl_rom_data_handle {
-    ($field:ident: $type:ty) => {
-        impl RomDataHandle for OwningRef<$type> {
-            type Target = $type;
-
-            fn resolve<'a>(&self, data: &'a RomData) -> Option<&'a Self::Target> {
-                data.$field.get(self).map(|e| &e.data)
-            }
-        }
-    };
-}
-
-// rooms: BTreeMap<RoomId, RoomHeader>
-impl_rom_data_handle!(doors: ExitType);
-// load_stations: BTreeMap<(HexU8, HexU8), LoadStation>
-impl_rom_data_handle!(compressed_level_data: Vec<u8>);
-impl_rom_data_handle!(fx_headers: FxHeader);
-impl_rom_data_handle!(enemy_populations: EnemyPopulation);
-impl_rom_data_handle!(enemy_gfx_sets: EnemyGfxSet);
-impl_rom_data_handle!(room_scroll_data: ScrollData);
-impl_rom_data_handle!(plm_populations: PlmPopulation);
-impl_rom_data_handle!(plm_param_scrolldata: Vec<ScrollDataChange>);
-impl_rom_data_handle!(bgdata_commands: BgDataCommandList);
-impl_rom_data_handle!(bgdata_tile_data: (Vec<u8>, bool));
-// doorcode_scroll_updates: DataDeduper<Vec<ScrollDataChange>>
-impl_rom_data_handle!(doorcode_raw: Vec<CodeInstruction>);
-impl_rom_data_handle!(tileset_tiledata: TileData);
-impl_rom_data_handle!(tileset_tiletables: TileTable);
-impl_rom_data_handle!(tileset_palettes: TilesetPalette);
 
 #[derive(Debug)]
 struct TemplateInternalState {
