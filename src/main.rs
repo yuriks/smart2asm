@@ -394,11 +394,11 @@ struct EnemyPopulationEntry {
     enemy_header: HexU16, // label
     pos_x: HexU16,
     pos_y: HexU16,
-    init_param: HexU16, // "Tilemap", initial instruction list pointer, though in practice overriden by the AI init
+    init_param: HexU16, // "Tilemap", initial instruction list pointer, though in practice overridden by the AI init
     flags1: HexU16,     // "Special", upper byte used by engine, lower used by enemy(?)
     flags2: HexU16,     // "Graphics"
     param1: HexU16,     // "Speed"
-    param2: HexU16,     // "Spaeed2",
+    param2: HexU16,     // "Speed2",
 }
 
 type EnemyGfxSet = Vec<EnemyGfxSetEntry>;
