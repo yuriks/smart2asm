@@ -500,9 +500,10 @@ pub struct Map {
 }
 
 pub struct Tileset {
-    gfx: Vec<u8>,
-    tiletable: Vec<u16>,
-    palette: Vec<u16>, // Empty for CRE
+    pub name: String,
+    pub gfx: Vec<u8>,
+    pub tiletable: Vec<u16>,
+    pub palette: Vec<u16>, // Empty for CRE
 }
 
 pub struct TilesetsInfo {
@@ -648,6 +649,7 @@ fn load_tilesets_from_dir(path: &Path) -> Result<BTreeMap<u8, Tileset>> {
         tilesets.insert(
             tileset_id,
             Tileset {
+                name: String::new(), // TODO
                 gfx: gfx_data,
                 tiletable: reinterpret_vec(ttb_data),
                 palette: palette_data,

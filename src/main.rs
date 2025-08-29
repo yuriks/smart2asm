@@ -517,9 +517,10 @@ type TilesetId = u8;
 
 #[derive(Debug, Serialize)]
 struct Tileset {
+    name: String,
     tiles: OwningRef<TileData>,
     tiletable: OwningRef<TileTable>,
-    palette: OwningRef<TilesetPalette>,
+    palette: Option<OwningRef<TilesetPalette>>,
 }
 
 #[derive(Clone, Debug, Hash, Serialize)]
@@ -616,6 +617,10 @@ fn write_file_filter(
     }
 }
 
+fn words_as_bytes_filter(words: Vec<u16>) -> Result<Vec<u8>, minijinja::Error> {
+    Ok(bytemuck::pod_collect_to_vec(&words))
+}
+
 fn join_with_commas<T: Display, E>(
     mut iter: impl Iterator<Item = Result<T, E>>,
 ) -> Result<String, E> {
@@ -706,6 +711,7 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     env.add_filter("h24", hex24_filter);
     env.add_filter("data_directive", HexValue::data_directive);
     env.add_filter("write_file", write_file_filter);
+    env.add_filter("words_as_bytes", words_as_bytes_filter);
 
     let template_context = context!(data => rom_data_arc.as_ref());
     for glob_entry in glob::glob(
@@ -861,6 +867,16 @@ fn main() -> Result<()> {
         debug!(%area_index, "processing area map");
         let area = AreaMap::from_xml(xml_area)?;
         *get_or_insert_default(&mut rom_data.area_maps, area_index.into()) = Some(area);
+    }
+    for (tileset_index, xml_tileset) in tilesets.cre {
+        debug!(%tileset_index, "processing CRE tileset");
+        let cre = Tileset::from_xml(&mut rom_data, xml_tileset, tileset_index, true)?;
+        rom_data.cre_tilesets.insert(tileset_index, cre);
+    }
+    for (tileset_index, xml_tileset) in tilesets.sce {
+        debug!(%tileset_index, "processing SCE tileset");
+        let sce = Tileset::from_xml(&mut rom_data, xml_tileset, tileset_index, false)?;
+        rom_data.sce_tilesets.insert(tileset_index, sce);
     }
 
     emit_asm(&config, Arc::new(rom_data), Arc::new(symbols))?;

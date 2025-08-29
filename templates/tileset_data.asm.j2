@@ -1,0 +1,28 @@
+; Tileset data
+
+; Tiledata (gfx)
+{% for labels, tiledata in data.tileset_tiledata %}
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+    {% set path = "tileset_data/" + labels | first + ".gfx" %}
+    incbin "{{ tiledata | write_file(path, compress=true) }}"
+{% endfor %}
+
+; Tiletables
+{% for labels, tiletable in data.tileset_tiletables %}
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+    {% set path = "tileset_data/" + labels | first + ".ttb" %}
+    incbin "{{ tiletable | words_as_bytes | write_file(path, compress=true) }}"
+{% endfor %}
+
+; Palettes
+{% for labels, palette in data.tileset_palettes %}
+{% for l in labels %}
+{{ l }}:
+{% endfor %}
+    {% set path = "tileset_data/" + labels | first + ".snespal" %}
+    incbin "{{ palette | words_as_bytes | write_file(path, compress=true) }}"
+{% endfor %}

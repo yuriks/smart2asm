@@ -4,10 +4,11 @@ use crate::{
     DoorHeader, DoorId, EnemyGfxSet, EnemyGfxSetEntry, EnemyPopulation, EnemyPopulationEntry,
     ExitType, FxHeader, FxHeaderEntry, LoadStation, MapIcon, MapLabel, PlmParam, PlmPopulation,
     PlmPopulationEntry, RomData, RoomHeader, RoomId, RoomState, ScrollDataChange, ScrollDataKind,
-    TILES_PER_SCREEN, xml_types,
+    TILES_PER_SCREEN, TileData, TileTable, Tileset, TilesetPalette, xml_types,
 };
 use anyhow::{Result, anyhow};
 use bytemuck::allocation::TransparentWrapperAlloc;
+use std::fmt::Write;
 
 impl RoomHeader {
     pub fn from_xml(
@@ -613,5 +614,42 @@ impl AreaMap {
             save_icons: convert_vec(xml.save_icons),
         };
         Ok(area_map)
+    }
+}
+
+impl Tileset {
+    pub fn from_xml(
+        rom_data: &mut RomData,
+        xml: xml_types::Tileset,
+        idx: u8,
+        is_cre: bool,
+    ) -> Result<Tileset> {
+        let suffix = {
+            let mut s = String::new();
+            if is_cre {
+                s.push_str("CRE_");
+            }
+            write!(&mut s, "{idx}")?;
+            if !xml.name.is_empty() {
+                write!(&mut s, "_{}", xml.name)?;
+            }
+            s
+        };
+
+        let tileset = Tileset {
+            name: xml.name,
+            tiles: rom_data
+                .tileset_tiledata
+                .insert(TileData(xml.gfx), format!("Tiles_{suffix}")),
+            tiletable: rom_data
+                .tileset_tiletables
+                .insert(TileTable(xml.tiletable), format!("TileTables_{suffix}")),
+            palette: (!xml.palette.is_empty()).then(|| {
+                rom_data
+                    .tileset_palettes
+                    .insert(TilesetPalette(xml.palette), format!("Palettes_{suffix}"))
+            }),
+        };
+        Ok(tileset)
     }
 }
