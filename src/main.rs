@@ -563,7 +563,6 @@ struct RomData {
 
 #[derive(Debug)]
 struct TemplateInternalState {
-    rom_data: Arc<RomData>,
     compression_queue: Mutex<Vec<String>>,
     metadata: Mutex<Metadata>,
     out_dir: PathBuf,
@@ -689,7 +688,6 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     let metadata = load_metadata(&config.output_dir)?.unwrap_or_default();
 
     let internal_state = Arc::new(TemplateInternalState {
-        rom_data: rom_data_arc.clone(),
         compression_queue: Default::default(),
         metadata: metadata.into(),
         out_dir: config.output_dir.clone(),
@@ -789,7 +787,7 @@ fn load_metadata(output_path: &Path) -> Result<Option<Metadata>> {
 fn write_file_if_not_matching(
     full_path: &Path,
     metadata_path: &str,
-    data: &Vec<u8>,
+    data: &[u8],
     metadata: &Mutex<Metadata>,
 ) -> Result<bool, io::Error> {
     let hash = FileHash(xxh3::xxh3_128(data));
