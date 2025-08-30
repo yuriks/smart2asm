@@ -8,6 +8,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use bytemuck::allocation::TransparentWrapperAlloc;
+use heck::ToUpperCamelCase;
 use std::fmt::Write;
 
 impl RoomHeader {
@@ -624,20 +625,24 @@ impl Tileset {
         idx: u8,
         is_cre: bool,
     ) -> Result<Tileset> {
+        let name = xml
+            .metadata
+            .map(|meta| meta.name.to_upper_camel_case())
+            .unwrap_or_default();
         let suffix = {
             let mut s = String::new();
             if is_cre {
                 s.push_str("CRE_");
             }
-            write!(&mut s, "{idx}")?;
-            if !xml.name.is_empty() {
-                write!(&mut s, "_{}", xml.name)?;
+            write!(&mut s, "{idx:02X}")?;
+            if !name.is_empty() {
+                write!(&mut s, "_{}", name)?;
             }
             s
         };
 
         let tileset = Tileset {
-            name: xml.name,
+            name,
             tiles: rom_data
                 .tileset_tiledata
                 .insert(TileData(xml.gfx), format!("Tiles_{suffix}")),

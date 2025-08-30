@@ -499,8 +499,15 @@ pub struct Map {
     pub save_icons: Vec<Icon>,
 }
 
-pub struct Tileset {
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct TilesetMetadata {
     pub name: String,
+}
+
+pub struct Tileset {
+    pub metadata: Option<TilesetMetadata>,
+
     pub gfx: Vec<u8>,
     pub tiletable: Vec<u16>,
     pub palette: Vec<u16>, // Empty for CRE
@@ -582,8 +589,14 @@ pub fn load_project_area_maps(project_path: &Path) -> Result<BTreeMap<u8, Map>> 
 #[tracing::instrument]
 pub fn load_project_tilesets(project_path: &Path) -> Result<TilesetsInfo> {
     Ok(TilesetsInfo {
-        cre: load_tilesets_from_dir(&project_path.join("Export/Tileset/CRE"))?,
-        sce: load_tilesets_from_dir(&project_path.join("Export/Tileset/SCE"))?,
+        cre: load_tilesets_from_dir(
+            &project_path.join("Export/Tileset/CRE"),
+            &project_path.join("Data/Tileset/CRE"),
+        )?,
+        sce: load_tilesets_from_dir(
+            &project_path.join("Export/Tileset/SCE"),
+            &project_path.join("Data/Tileset/SCE"),
+        )?,
     })
 }
 
@@ -633,23 +646,30 @@ fn detect_and_load_palette(base_filepath: &Path) -> Result<Vec<u16>> {
     }
 }
 
-fn load_tilesets_from_dir(path: &Path) -> Result<BTreeMap<u8, Tileset>> {
+fn load_tilesets_from_dir(export_path: &Path, data_path: &Path) -> Result<BTreeMap<u8, Tileset>> {
     let mut tilesets = BTreeMap::new();
-    for e in path.read_dir()? {
+    for e in export_path.read_dir()? {
         let file_name = e?.file_name();
         let Ok(HexU8(tileset_id)) = HexU8::from_str(&file_name.to_string_lossy()) else {
             continue;
         };
 
-        let tileset_path = path.join(file_name);
+        let tileset_path = export_path.join(&file_name);
         let gfx_data = fs::read(tileset_path.join("8x8tiles.gfx"))?;
         let ttb_data = fs::read(tileset_path.join("16x16tiles.ttb"))?;
         let palette_data = detect_and_load_palette(&tileset_path.join("palette"))?;
 
+        let metadata_path = data_path.join(&file_name).with_extension("xml");
+        let metadata = if fs::exists(&metadata_path)? {
+            Some(read_xml_file(&metadata_path)?)
+        } else {
+            None
+        };
+
         tilesets.insert(
             tileset_id,
             Tileset {
-                name: String::new(), // TODO
+                metadata,
                 gfx: gfx_data,
                 tiletable: reinterpret_vec(ttb_data),
                 palette: palette_data,
