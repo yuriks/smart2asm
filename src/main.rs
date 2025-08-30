@@ -632,6 +632,10 @@ fn join_with_commas<T: Display, E>(
     })
 }
 
+fn hex_filter(value: u64, width: Option<usize>) -> String {
+    format!("{value:0width$X}", width = width.unwrap_or(0))
+}
+
 fn hex8_filter(value: &Value) -> Result<String, minijinja::Error> {
     match value.kind() {
         ValueKind::Number => {
@@ -703,7 +707,7 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
         Value::from_dyn_object(internal_state.clone()),
     );
     env.add_global("symbols", Value::from_dyn_object(symbols.clone()));
-    env.add_filter("hex8", hex8_filter);
+    env.add_filter("hex", hex_filter);
     env.add_filter("h8", hex8_filter);
     env.add_filter("h16", hex16_filter);
     env.add_filter("h24", hex24_filter);

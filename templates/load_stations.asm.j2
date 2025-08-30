@@ -9,13 +9,13 @@ LoadStationListPointers:
 LoadStations_Area{{ loop.index0 }}:
 {% for station in area %}
 {% if station %}
-    ; Station {{ loop.index0 | hex8 }}
+    ; Station {{ loop.index0 | h8 }}
     {% set from_door_ref = data.rooms[station.from_door.room].exits[station.from_door.exit] %}
     dw RoomHeader_{{ data.rooms[station.room].name }}, {{ from_door_ref }}
     {# samus_y comes before samus_x for some reason #}
     dw {{ station.unused }},{{ station.screen_x }},{{ station.screen_y }},{{ station.samus_y }},{{ station.samus_x }}
 {% else %}
-    ; Station {{ loop.index0 | hex8 }} - Unused
+    ; Station {{ loop.index0 | h8 }} - Unused
     dw $0000,$0000
     dw $0000,$0000,$0000,$0000,$0000
 {% endif %}
