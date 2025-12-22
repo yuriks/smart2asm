@@ -698,7 +698,7 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     });
 
     let mut env = Environment::new();
-    env.set_loader(minijinja::path_loader("templates"));
+    env.set_loader(minijinja::path_loader(&config.templates_dir));
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
     env.set_undefined_behavior(UndefinedBehavior::Strict);
