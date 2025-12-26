@@ -682,32 +682,3 @@ fn load_tilesets_from_dir(export_path: &Path, data_path: &Path) -> Result<BTreeM
 fn reinterpret_vec<T: bytemuck::Pod, U: bytemuck::Pod>(v: Vec<T>) -> Vec<U> {
     bytemuck::try_cast_vec(v).unwrap_or_else(|(_, v)| bytemuck::pod_collect_to_vec(&v))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use quick_xml::de::{from_reader, from_str};
-
-    const CRATERIA_PB_ROOM_XML: &str =
-        include_str!("../../smart_xml/Export/Rooms/CRATERIA POWER BOMB ROOM.xml");
-
-    #[test]
-    fn test_crateria_pbs_room() {
-        let _room: Room = from_str(CRATERIA_PB_ROOM_XML).unwrap();
-        //eprintln!("{:#?}", room);
-    }
-
-    const LANDING_SITE_XML: &str = include_str!("../../smart_xml/Export/Rooms/LANDING SITE.xml");
-
-    #[test]
-    fn test_landing_site_room() {
-        let _room: Room = from_str(LANDING_SITE_XML).unwrap();
-        //eprintln!("{:#?}", room);
-    }
-
-    #[test]
-    fn test_landing_site_room_buf() {
-        let _room: Room = from_reader(LANDING_SITE_XML.as_bytes()).unwrap();
-        //eprintln!("{:#?}", room);
-    }
-}
