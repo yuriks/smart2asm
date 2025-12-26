@@ -32,11 +32,14 @@ A symbol file (In WLA-DX format. Use `--symbols=wla` in asar.) is used to map no
 
 Note that these don't need to correspond to the addresses of symbols in your actual ROM: By starting with a symbols file for vanilla SM, and then allocating new stable unique addresses for any new routines you write, you can ensure that pointers reference the correct labels even as things move around in your built ROM, without needing to keep addresses in SMART synchronized and up to date.
 
-If you don't have a symbols file, you can generate one by building [sm_disassembly] and copying the generated `symbols.sym` file. It's also possible to start with an empty symbols file, just create a file with a single line:
+If you don't have a symbol file, it's recommended to generate one by building [sm_disassembly] and copying the generated `symbols.sym` file, so that all common vanilla routines are mapped. It's also possible to create one manually, with the format:
 ```
 [labels]
+84:EFD3 PLMEntry_MyNewPLM
+8F:E9B0 my_custom_room_asm
+; etc. (this is a comment)
 ```
-Later, labels can be added under this header with the format `80:1234 my_label_name`. Pointers that don't map to a label will be emitted directly as raw addresses. 
+Pointers that don't map to a label (or if a symbol file is not specified) will be emitted directly as raw addresses.
 
 ### Invocation
 

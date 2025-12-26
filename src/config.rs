@@ -18,7 +18,7 @@ pub struct AppConfig {
     pub input_dir: PathBuf,
     /// Symbols file (in WLA-DX format) used to convert addresses to labels
     #[bpaf(long("vanilla-symbols"), short('s'), argument("FILE"))]
-    pub vanilla_symbols_file: PathBuf,
+    pub vanilla_symbols_file: Option<PathBuf>,
     /// Directory with Jinja2 templates to generate assembly from
     #[bpaf(long("templates"), short('T'), argument("DIR"))]
     pub templates_dir: PathBuf,

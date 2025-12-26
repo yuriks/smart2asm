@@ -17,7 +17,7 @@ pub struct SymbolMap {
 }
 
 impl SymbolMap {
-    pub fn new(addr_to_label: HashMap<u32, String>) -> Self {
+    pub fn from_map(addr_to_label: HashMap<u32, String>) -> Self {
         SymbolMap { addr_to_label }
     }
 
@@ -76,7 +76,7 @@ impl SymbolMap {
         pb.finish_and_clear();
 
         info!("Loaded {} symbols", addr_to_label.len());
-        Ok(SymbolMap::new(addr_to_label))
+        Ok(SymbolMap::from_map(addr_to_label))
     }
 
     pub fn resolve_label(&self, bank: u8, addr: HexU16) -> Option<&str> {

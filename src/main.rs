@@ -864,7 +864,11 @@ fn main() -> Result<()> {
     let areas = xml_types::load_project_area_maps(&config.input_dir)?;
     let tilesets = xml_types::load_project_tilesets(&config.input_dir)?;
 
-    let symbols = SymbolMap::from_wla_sym_file(&config.vanilla_symbols_file)?;
+    let symbols = if let Some(symbols_file) = &config.vanilla_symbols_file {
+        SymbolMap::from_wla_sym_file(symbols_file)?
+    } else {
+        SymbolMap::from_map(HashMap::new())
+    };
 
     let mut rom_data = RomData::default();
     for ((area_index, room_index), (room_name, xml_room)) in rooms {
