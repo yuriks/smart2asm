@@ -14,7 +14,7 @@ indicatif = "0.18.0"
 minijinja = { version = "2.10", features = ["loader"] }
 quick-xml = { version = "0.38.1", features = ["serialize", "serde-types"] }
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.9.5"
+toml = "0.9.10"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
