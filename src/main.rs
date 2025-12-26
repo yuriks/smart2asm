@@ -826,7 +826,8 @@ fn compress_lz5_file(config: &AppConfig, path: &str) -> Result<()> {
         .arg("-c") // Compress
         .arg("-f") // Input file
         .arg(config.output_dir.join(path))
-        .status()?;
+        .status()
+        .context("invoking AmoebaCompress")?;
     if status.success() {
         Ok(())
     } else {
