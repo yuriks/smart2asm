@@ -715,6 +715,12 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     env.add_filter("write_file", write_file_filter);
     env.add_filter("words_as_bytes", words_as_bytes_filter);
 
+    // Attempt to create output directory
+    match fs::create_dir(&config.output_dir) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        x => x
+    }.context("Failed to create output directory")?;
+
     let template_context = context!(data => rom_data_arc.as_ref());
     for glob_entry in glob::glob(
         config
