@@ -1,0 +1,7 @@
+# one of the compressors defined in `external_compressors`
+default_compressor = "AmoebaCompress"
+
+[external_compressors.AmoebaCompress]
+path = "AmoebaCompress"
+params = ["-c", "-f", "{{input_file}}"]
+compressed_suffix = ".lz5"

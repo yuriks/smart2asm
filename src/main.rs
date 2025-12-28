@@ -1,5 +1,5 @@
 use crate::asm::SymbolMap;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, CmdlineOptions};
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::util::IgnoreMutexPoison;
 use anyhow::{Context, Result, anyhow};
@@ -688,17 +688,21 @@ fn hex24_filter(value: &Value) -> Result<String, minijinja::Error> {
     }
 }
 
-fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolMap>) -> Result<()> {
-    let metadata = load_metadata(&config.output_dir)?.unwrap_or_default();
+fn emit_asm(
+    app_config: &AppConfig,
+    rom_data_arc: Arc<RomData>,
+    symbols: Arc<SymbolMap>,
+) -> Result<()> {
+    let metadata = load_metadata(&app_config.cmdline.output_dir)?.unwrap_or_default();
 
     let internal_state = Arc::new(TemplateInternalState {
         compression_queue: Default::default(),
         metadata: metadata.into(),
-        out_dir: config.output_dir.clone(),
+        out_dir: app_config.cmdline.output_dir.clone(),
     });
 
     let mut env = Environment::new();
-    env.set_loader(minijinja::path_loader(&config.templates_dir));
+    env.set_loader(minijinja::path_loader(&app_config.cmdline.templates_dir));
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
     env.set_undefined_behavior(UndefinedBehavior::Strict);
@@ -716,14 +720,16 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
     env.add_filter("words_as_bytes", words_as_bytes_filter);
 
     // Attempt to create output directory
-    match fs::create_dir(&config.output_dir) {
+    match fs::create_dir(&app_config.cmdline.output_dir) {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        x => x
-    }.context("Failed to create output directory")?;
+        x => x,
+    }
+    .context("Failed to create output directory")?;
 
     let template_context = context!(data => rom_data_arc.as_ref());
     for glob_entry in glob::glob(
-        config
+        app_config
+            .cmdline
             .templates_dir
             .join("*.j2")
             .to_str()
@@ -739,7 +745,7 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
         let template = env.get_template(template_name)?;
 
         let fname = template_name.strip_suffix(".j2").expect("`.j2` suffix");
-        let output_path = config.output_dir.join(fname);
+        let output_path = app_config.cmdline.output_dir.join(fname);
         debug!("writing assembly");
         let mut f = BufWriter::new(File::create(output_path)?);
         template.render_to_write(&template_context, &mut f)?;
@@ -762,12 +768,15 @@ fn emit_asm(config: &AppConfig, rom_data_arc: Arc<RomData>, symbols: Arc<SymbolM
         pb.set_message(format!("Compressing {f}..."));
         pb.inc(1);
         debug!(input_file = f, "compressing");
-        compress_lz5_file(config, &f)?;
+        compress_lz5_file(&app_config.cmdline, &f)?;
     }
     pb.finish_and_clear();
 
     let new_metadata = toml::to_string(&internal_state.metadata.into_inner_unpoisoned())?;
-    fs::write(config.output_dir.join(METADATA_FILENAME), new_metadata)?;
+    fs::write(
+        app_config.cmdline.output_dir.join(METADATA_FILENAME),
+        new_metadata,
+    )?;
 
     Ok(())
 }
@@ -821,7 +830,7 @@ fn write_file_if_not_matching(
     Ok(changed)
 }
 
-fn compress_lz5_file(config: &AppConfig, path: &str) -> Result<()> {
+fn compress_lz5_file(config: &CmdlineOptions, path: &str) -> Result<()> {
     let status = Command::new(&config.compressor_path)
         .arg("-c") // Compress
         .arg("-f") // Input file
@@ -856,15 +865,21 @@ fn configure_tracing() {
 }
 
 fn main() -> Result<()> {
-    let config = config::app_config().run();
+    let cmdline_options = config::cmdline_options().run();
     ui::init_console();
     configure_tracing();
 
-    let rooms = xml_types::load_project_rooms(&config.input_dir)?;
-    let areas = xml_types::load_project_area_maps(&config.input_dir)?;
-    let tilesets = xml_types::load_project_tilesets(&config.input_dir)?;
+    let config = AppConfig {
+        config: config::load_config(cmdline_options.config_path.as_deref())
+            .context("reading config file")?,
+        cmdline: cmdline_options,
+    };
 
-    let symbols = if let Some(symbols_file) = &config.vanilla_symbols_file {
+    let rooms = xml_types::load_project_rooms(&config.cmdline.input_dir)?;
+    let areas = xml_types::load_project_area_maps(&config.cmdline.input_dir)?;
+    let tilesets = xml_types::load_project_tilesets(&config.cmdline.input_dir)?;
+
+    let symbols = if let Some(symbols_file) = &config.cmdline.vanilla_symbols_file {
         SymbolMap::from_wla_sym_file(symbols_file)?
     } else {
         SymbolMap::from_map(HashMap::new())
