@@ -12,9 +12,9 @@ If you have some experience with SM hacking and are interested in making a hack 
 
 ## Installation
 
-For compiling from source, ensure you have Rust and requirements ([install instructions](https://rust-lang.org/tools/install/)), then just run `cargo build`. The resulting binary will be in `target/debug/smart2asm.exe`. (TODO: Provide downloadable binaries)
+For compiling from source, ensure you have Rust and requirements ([install instructions](https://rust-lang.org/tools/install/)), then just run `cargo build --release`. The resulting binary will be in `target/release/smart2asm.exe`. (TODO: Provide downloadable binaries)
 
-Compressing data also requires `AmoebaCompress.exe`. Download it from the [SMART website][SMART] above and place it in the same directory as `smart2asm.exe`. It might require installation of a .NET Core runtime, in which case it'll give a download link to it when you try to execute it.
+smart2asm now includes a [fast built-in compressor](https://github.com/NobodyNada/lznint), so no external programs or DLLs are required anymore. However, external compressors (such as [AmoebaCompress][SMART]) are still supported and can be defined via a configuration file. Those could make different decompression speed tradeoffs, or even be used for custom compression formats. (TODO: Per-resource compressor selection)
 
 ## Usage
 
