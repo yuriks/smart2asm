@@ -1,5 +1,6 @@
 # one of the compressors defined in `external_compressors`
-default_compressor = "AmoebaCompress"
+# or the internal lz5 compressor "lznint"
+default_compressor = "lznint"
 
 [external_compressors.AmoebaCompress]
 path = "AmoebaCompress"

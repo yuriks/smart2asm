@@ -4,6 +4,7 @@ use anyhow::{Context, anyhow};
 use indicatif::ProgressBar;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use tracing::debug;
@@ -68,6 +69,22 @@ impl Compressor for ExternalCompressor {
     }
 }
 
+struct Lznint;
+
+impl Compressor for Lznint {
+    fn default_filename_suffix(&self) -> &OsStr {
+        "lz5".as_ref()
+    }
+
+    fn compress(&self, input_file: &Path, output_file: &Path) -> anyhow::Result<()> {
+        // TODO Avoid temporary intermediate file?
+        let input_data = fs::read(input_file).context("reading input file")?;
+        let output_data = lznint::compress(&input_data);
+        fs::write(output_file, &output_data).context("writing output file")?;
+        Ok(())
+    }
+}
+
 pub fn process_compression_queue(
     app_config: &AppConfig,
     compression_queue: Vec<String>,
@@ -88,9 +105,19 @@ pub fn process_compression_queue(
     Ok(())
 }
 
+fn get_compressor<'cfg>(app_config: &'cfg AppConfig, compressor: &str) -> Option<&'cfg dyn Compressor> {
+    if let Some(c) = app_config.config.external_compressors.get(compressor) {
+        return Some(c);
+    }
+    match compressor {
+        "lznint" => Some(&Lznint),
+        _ => None,
+    }
+}
+
 fn compress_file(app_config: &AppConfig, path: &str, compressor: &str) -> anyhow::Result<()> {
     debug!(input_file = path, "compressing");
-    let compressor = &app_config.config.external_compressors[compressor];
+    let compressor = get_compressor(app_config, compressor).unwrap();
     let input_path = app_config.cmdline.output_dir.join(path);
     let output_path = input_path.with_added_extension(compressor.default_filename_suffix());
     compressor.compress(&input_path, &output_path)

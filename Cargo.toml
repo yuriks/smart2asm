@@ -11,6 +11,7 @@ glob = "0.3"
 heck = "0.5"
 hex = { version = "0.4.3", features = ["serde"]}
 indicatif = "0.18.0"
+lznint = "1.0.2"
 minijinja = { version = "2.10", features = ["loader"] }
 quick-xml = { version = "0.38.1", features = ["serialize", "serde-types"] }
 serde = { version = "1.0", features = ["derive"] }
