@@ -10,16 +10,9 @@ const VERSION_STRING: &str = concat!(env!("CARGO_BIN_NAME"), " ", env!("CARGO_PK
 #[bpaf(options, version(VERSION_STRING))]
 /// Converts a SMART project into assembly datafiles for use with the SM Disassembly
 pub struct CmdlineOptions {
-    /// Path to the AmoebaCompress binary
-    #[bpaf(
-        long("compressor"), short('C'), argument("FILE"),
-        fallback("AmoebaCompress".into()), debug_fallback)]
-    pub compressor_path: PathBuf,
-
     /// Path to additional configuration file
     #[bpaf(long("config"), short, argument("FILE"))]
     pub config_path: Option<PathBuf>,
-
     /// Input SMART project directory containing "project.xml"
     #[bpaf(long("input"), short, argument("DIR"))]
     pub input_dir: PathBuf,
@@ -38,7 +31,7 @@ pub struct CmdlineOptions {
 pub struct ExternalCompressor {
     pub path: PathBuf,
     pub params: Vec<String>,
-    pub compressed_suffix: String,
+    pub compressed_extension: String,
 }
 
 #[derive(Deserialize)]

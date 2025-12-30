@@ -3,5 +3,5 @@ default_compressor = "AmoebaCompress"
 
 [external_compressors.AmoebaCompress]
 path = "AmoebaCompress"
-params = ["-c", "-f", "{{input_file}}"]
-compressed_suffix = ".lz5"
+params = ["-c", "-f", "{{input}}", "-o", "{{output}}"]
+compressed_extension = "lz5"

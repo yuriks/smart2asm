@@ -1,9 +1,8 @@
 use crate::asm::SymbolMap;
-use crate::config::{AppConfig, CmdlineOptions};
+use crate::config::AppConfig;
 use crate::hex_types::{HexU8, HexU16, HexU24, HexValue};
 use crate::util::IgnoreMutexPoison;
-use anyhow::{Context, Result, anyhow};
-use indicatif::ProgressBar;
+use anyhow::{Context, Result};
 use minijinja::value::{Enumerator, Kwargs, Object, ObjectExt, ObjectRepr, ValueKind};
 use minijinja::{Environment, ErrorKind, State, UndefinedBehavior, Value, context, value};
 use serde::ser::{SerializeSeq, SerializeStruct};
@@ -16,13 +15,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::BufWriter;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
 use tracing::{debug, error, info_span};
 use xxhash_rust::xxh3;
 
 mod asm;
+mod compress;
 mod config;
 mod hex_types;
 mod ui;
@@ -753,24 +752,9 @@ fn emit_asm(
 
     drop(env);
     let internal_state = Arc::into_inner(internal_state).unwrap();
+    let compression_queue = internal_state.compression_queue.into_inner_unpoisoned();
 
-    // TODO: Parallelize
-    let pb =
-        ui::add_progress_bar(ProgressBar::no_length()).with_style(ui::STYLE_MSG_PROGRESS.clone());
-    for f in {
-        let iter = internal_state
-            .compression_queue
-            .into_inner_unpoisoned()
-            .into_iter();
-        pb.set_length(iter.len().try_into().unwrap_or_default());
-        iter
-    } {
-        pb.set_message(format!("Compressing {f}..."));
-        pb.inc(1);
-        debug!(input_file = f, "compressing");
-        compress_lz5_file(&app_config.cmdline, &f)?;
-    }
-    pb.finish_and_clear();
+    compress::process_compression_queue(app_config, compression_queue)?;
 
     let new_metadata = toml::to_string(&internal_state.metadata.into_inner_unpoisoned())?;
     fs::write(
@@ -828,20 +812,6 @@ fn write_file_if_not_matching(
     }
 
     Ok(changed)
-}
-
-fn compress_lz5_file(config: &CmdlineOptions, path: &str) -> Result<()> {
-    let status = Command::new(&config.compressor_path)
-        .arg("-c") // Compress
-        .arg("-f") // Input file
-        .arg(config.output_dir.join(path))
-        .status()
-        .context("invoking AmoebaCompress")?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!("AmoebaCompress returned with status {}", status))
-    }
 }
 
 fn configure_tracing() {
